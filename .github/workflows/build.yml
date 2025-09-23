@@ -1,0 +1,35 @@
+name: Build & Release C++ Windows
+
+on:
+  push:
+    tags:
+      - 'v*'   # v1.0, v2.3 같은 태그 push 시 동작 (Release 트리거)
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v3
+
+    - name: Install MinGW (for g++)
+      uses: egor-tensin/setup-mingw@v2
+      with:
+        platform: x64   # 64비트 빌드
+
+    - name: Build with g++
+      run: g++ -o SerialCommunicator.exe SerialCommunicator.cpp -lws2_32 -lpthread
+
+    - name: Upload artifact (for debugging)
+      uses: actions/upload-artifact@v3
+      with:
+        name: SerialCommunicator
+        path: SerialCommunicator.exe
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: SerialCommunicator.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -11,7 +11,7 @@ jobs:
 
     steps:
     - name: Checkout source
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Install MinGW (for g++)
       uses: egor-tensin/setup-mingw@v2
@@ -21,8 +21,9 @@ jobs:
     - name: Build with g++
       run: g++ -o SerialCommunicator.exe SerialCommunicator.cpp -lws2_32 -lpthread
 
+    # ✅ v4 로 업데이트
     - name: Upload artifact (for debugging)
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: SerialCommunicator
         path: SerialCommunicator.exe

@@ -19,7 +19,7 @@ jobs:
         platform: x64   # 64비트 빌드
 
     - name: Build with g++
-      run: g++ -o SerialCommunicator.exe SerialCommunicator.cpp -lws2_32 -lpthread
+      run: g++ -o SerialCommunicator.exe SerialCommunicator.cpp -lws2_32 
 
     # ✅ v4 로 업데이트
     - name: Upload artifact (for debugging)

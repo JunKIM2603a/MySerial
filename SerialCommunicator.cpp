@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iomanip>
 #include <ctime>
+#include <cstring> // for memcpy
 
 // 로그 파일 스트림
 std::ofstream logFile;
@@ -19,6 +20,14 @@ void logMessage(const std::string& message) {
     logFile << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << " - " << message << std::endl;
     std::cout << message << std::endl;
 }
+
+// ==========================================================
+// UPDATE: 프레임 구조 정의
+// ==========================================================
+const char SOF = 0x02; // Start of Frame
+const char EOF_BYTE = 0x03; // End of Frame
+const int FRAME_HEADER_SIZE = sizeof(int); // 프레임 번호 (4 bytes)
+const int FRAME_OVERHEAD = 1 + FRAME_HEADER_SIZE + 1; // SOF + FrameNum + EOF = 6 bytes
 
 // 시리얼 포트 핸들 관리 클래스
 class SerialPort {
@@ -68,7 +77,7 @@ public:
         // 데이터 교환을 위한 합리적인 타임아웃 설정
         COMMTIMEOUTS timeouts = { 0 };
         timeouts.ReadIntervalTimeout = 50;
-        timeouts.ReadTotalTimeoutConstant = 2000; // 2초
+        timeouts.ReadTotalTimeoutConstant = 3000; // 타임아웃을 3초로 약간 늘림
         timeouts.ReadTotalTimeoutMultiplier = 10;
         timeouts.WriteTotalTimeoutConstant = 50;
         timeouts.WriteTotalTimeoutMultiplier = 10;
@@ -90,24 +99,18 @@ public:
         }
         return bytesWritten;
     }
-
-    // ==========================================================
-    // BUG FIX: 요청한 데이터를 모두 받을 때까지 반복해서 읽는 안정적인 read 함수
-    // ==========================================================
+    
     int read(char* buffer, int length) {
         DWORD totalBytesRead = 0;
         while (totalBytesRead < length) {
             DWORD bytesReadInThisCall = 0;
             if (!ReadFile(hComm, buffer + totalBytesRead, length - totalBytesRead, &bytesReadInThisCall, NULL)) {
-                // ReadFile 함수 자체에서 오류 발생
                 logMessage("Error during ReadFile call.");
                 return -1;
             }
             if (bytesReadInThisCall > 0) {
                 totalBytesRead += bytesReadInThisCall;
             } else {
-                 // 타임아웃 발생 (2초 동안 데이터가 더 이상 들어오지 않음)
-                 // 이 경우, 불완전한 데이터를 받았음을 알리기 위해 지금까지 받은 바이트 수를 반환
                 break;
             }
         }
@@ -120,7 +123,7 @@ private:
 
 // 설정 정보 구조체
 struct Settings {
-    int datasize;
+    int datasize; // Payload size
     int num;
 };
 
@@ -194,63 +197,95 @@ void clientMode(const std::string& comport, int baudrate, int datasize, int num)
         return;
     }
     ack[3] = '\0';
-    
     if (std::string(ack) != "ACK") {
         logMessage("Error: Invalid response from server. Expected ACK, got: " + std::string(ack));
         return;
     }
     logMessage("ACK received from server.");
-
+    
     // 6 & 8. 데이터 송수신 및 무결성 검사
-    std::vector<char> sendBuffer(datasize, 'C'); // 'C' for Client
-    std::vector<char> receiveBuffer(datasize);
+    const int frameSize = datasize + FRAME_OVERHEAD;
+    std::vector<char> sendFrame(frameSize);
+    std::vector<char> receiveFrame(frameSize);
     Results clientResults = {0, 0, 0};
 
     auto sender = [&]() {
+        // 프레임 구성
+        sendFrame[0] = SOF;
+        for (int j = 0; j < datasize; ++j) {
+            sendFrame[1 + FRAME_HEADER_SIZE + j] = static_cast<char>(j % 256);
+        }
+        sendFrame[frameSize - 1] = EOF_BYTE;
+
         for (int i = 0; i < num; ++i) {
-            if (serial.write(sendBuffer.data(), datasize) != datasize) {
-                logMessage("Error sending data in iteration " + std::to_string(i + 1));
+            memcpy(&sendFrame[1], &i, FRAME_HEADER_SIZE);
+            if (serial.write(sendFrame.data(), frameSize) != frameSize) {
+                logMessage("Error sending frame " + std::to_string(i));
             } else {
-                 logMessage("Sending data... (" + std::to_string(i + 1) + "/" + std::to_string(num) + ")");
+                 logMessage("Sending frame " + std::to_string(i) + "...");
             }
         }
     };
 
     auto receiver = [&]() {
+        std::vector<char> expectedPayload(datasize);
+        for (int j = 0; j < datasize; ++j) {
+            expectedPayload[j] = static_cast<char>(255 - (j % 256));
+        }
+
         for (int i = 0; i < num; ++i) {
-            int received = serial.read(receiveBuffer.data(), datasize);
-            if (received == datasize) {
+            int received = serial.read(receiveFrame.data(), frameSize);
+            bool isFrameOk = true;
+            std::string errorReason = "";
+
+            if (received != frameSize) {
+                isFrameOk = false;
+                errorReason = "Size mismatch (got " + std::to_string(received) + ")";
+            } else {
+	    // 데이터 내용 검증
+                int frameNum;
+                memcpy(&frameNum, &receiveFrame[1], FRAME_HEADER_SIZE);
+
+                if (receiveFrame[0] != SOF || receiveFrame[frameSize - 1] != EOF_BYTE) {
+                    isFrameOk = false;
+                    errorReason = "SOF/EOF mismatch";
+                } else if (frameNum != i) {
+                    isFrameOk = false;
+                    errorReason = "Frame num mismatch (expected " + std::to_string(i) + ", got " + std::to_string(frameNum) + ")";
+                } else if (memcmp(&receiveFrame[1 + FRAME_HEADER_SIZE], expectedPayload.data(), datasize) != 0) {
+                    isFrameOk = false;
+                    errorReason = "Payload content mismatch";
+                }
+            }
+
+            if (isFrameOk) {
                 clientResults.totalReceivedBytes += received;
                 clientResults.receivedNum++;
-                logMessage("Data received: size=" + std::to_string(received) + ", count=" + std::to_string(clientResults.receivedNum));
+                logMessage("Received frame " + std::to_string(i) + ": OK");
             } else {
                 clientResults.errorCount++;
-                logMessage("Error: Data integrity failed. Expected " + std::to_string(datasize) + ", got " + std::to_string(received) + ". Error count: " + std::to_string(clientResults.errorCount));
+                logMessage("Received frame " + std::to_string(i) + ": NG - " + errorReason + ". Total errors: " + std::to_string(clientResults.errorCount));
             }
         }
     };
 
     std::thread senderThread(sender);
-    std::thread receiverThread(receiver);
-
     senderThread.join();
+    
+    std::thread receiverThread(receiver);
     receiverThread.join();
 
     logMessage("Data exchange complete.");
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
-    // ==========================================================
     // 규칙 1: 클라이언트는 'Master'로서 결과를 먼저 전송한다.
-    // ==========================================================
     if (serial.write(reinterpret_cast<char*>(&clientResults), sizeof(Results)) != sizeof(Results)) {
         logMessage("Error: Failed to send results to server.");
     } else {
         logMessage("Client results sent to server.");
     }
 
-    // ==========================================================
     // 규칙 2: 서버로부터 오는 결과 응답을 수신한다.
-    // ==========================================================
     Results serverResults;
     if (serial.read(reinterpret_cast<char*>(&serverResults), sizeof(Results)) == sizeof(Results)) {
         logMessage("Results received from server.");
@@ -276,10 +311,6 @@ void serverMode(const std::string& comport, int baudrate) {
 
     // 4. 클라이언트로부터 옵션 수신
     Settings settings;
-    // ==========================================================
-    // BUG FIX: 새로운 read 함수 덕분에 이제 여기서 클라이언트가
-    // 데이터를 보낼 때까지 안정적으로 기다립니다.
-    // ==========================================================
     if (serial.read(reinterpret_cast<char*>(&settings), sizeof(Settings)) != sizeof(Settings)) {
         logMessage("Error: Failed to receive settings from client. Connection timed out or closed.");
         return;
@@ -295,46 +326,81 @@ void serverMode(const std::string& comport, int baudrate) {
     logMessage("ACK sent to client.");
 
     // 7 & 9. 데이터 송수신 및 무결성 검사
-    std::vector<char> sendBuffer(settings.datasize, 'S'); // 'S' for Server
-    std::vector<char> receiveBuffer(settings.datasize);
+    const int datasize = settings.datasize;
+    const int num = settings.num;
+    const int frameSize = datasize + FRAME_OVERHEAD;
+    std::vector<char> sendFrame(frameSize);
+    std::vector<char> receiveFrame(frameSize);
     Results serverResults = {0, 0, 0};
 
     auto sender = [&]() {
-        for (int i = 0; i < settings.num; ++i) {
-            if (serial.write(sendBuffer.data(), settings.datasize) != settings.datasize) {
-                logMessage("Error sending data in iteration " + std::to_string(i + 1));
+        // 프레임 구성
+        sendFrame[0] = SOF;
+        for (int j = 0; j < datasize; ++j) {
+            sendFrame[1 + FRAME_HEADER_SIZE + j] = static_cast<char>(255 - (j % 256));
+        }
+        sendFrame[frameSize - 1] = EOF_BYTE;
+
+        for (int i = 0; i < num; ++i) {
+            memcpy(&sendFrame[1], &i, FRAME_HEADER_SIZE);
+            if (serial.write(sendFrame.data(), frameSize) != frameSize) {
+                logMessage("Error sending frame " + std::to_string(i));
             } else {
-                 logMessage("Sending data... (" + std::to_string(i + 1) + "/" + std::to_string(settings.num) + ")");
+                 logMessage("Sending frame " + std::to_string(i) + "...");
             }
         }
     };
 
     auto receiver = [&]() {
-        for (int i = 0; i < settings.num; ++i) {
-            int received = serial.read(receiveBuffer.data(), settings.datasize);
-            if (received == settings.datasize) {
+        std::vector<char> expectedPayload(datasize);
+        for (int j = 0; j < datasize; ++j) {
+            expectedPayload[j] = static_cast<char>(j % 256);
+        }
+
+        for (int i = 0; i < num; ++i) {
+            int received = serial.read(receiveFrame.data(), frameSize);
+            bool isFrameOk = true;
+            std::string errorReason = "";
+
+            if (received != frameSize) {
+                isFrameOk = false;
+                errorReason = "Size mismatch (got " + std::to_string(received) + ")";
+            } else {
+	    // 데이터 내용 검증
+                int frameNum;
+                memcpy(&frameNum, &receiveFrame[1], FRAME_HEADER_SIZE);
+
+                if (receiveFrame[0] != SOF || receiveFrame[frameSize - 1] != EOF_BYTE) {
+                    isFrameOk = false;
+                    errorReason = "SOF/EOF mismatch";
+                } else if (frameNum != i) {
+                    isFrameOk = false;
+                    errorReason = "Frame num mismatch (expected " + std::to_string(i) + ", got " + std::to_string(frameNum) + ")";
+                } else if (memcmp(&receiveFrame[1 + FRAME_HEADER_SIZE], expectedPayload.data(), datasize) != 0) {
+                    isFrameOk = false;
+                    errorReason = "Payload content mismatch";
+                }
+            }
+
+            if (isFrameOk) {
                 serverResults.totalReceivedBytes += received;
                 serverResults.receivedNum++;
-                 logMessage("Data received: size=" + std::to_string(received) + ", count=" + std::to_string(serverResults.receivedNum));
+                logMessage("Received frame " + std::to_string(i) + ": OK");
             } else {
                 serverResults.errorCount++;
-                logMessage("Error: Data integrity failed. Expected " + std::to_string(settings.datasize) + ", got " + std::to_string(received) + ". Error count: " + std::to_string(serverResults.errorCount));
+                logMessage("Received frame " + std::to_string(i) + ": NG - " + errorReason + ". Total errors: " + std::to_string(serverResults.errorCount));
             }
         }
     };
 
-    std::thread senderThread(sender);
     std::thread receiverThread(receiver);
-
-    senderThread.join();
     receiverThread.join();
+    
+    std::thread senderThread(sender);
+    senderThread.join();
 
     logMessage("Data exchange complete.");
     std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    // ==========================================================
-    // BUG FIX: Deadlock 방지를 위해 송신/수신 순서를 변경
-    // ==========================================================
 
     // 규칙 1: 서버는 'Slave'로서 클라이언트의 결과를 먼저 수신한다.
     Results clientResults;

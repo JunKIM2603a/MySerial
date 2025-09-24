@@ -10,24 +10,31 @@ jobs:
     runs-on: windows-latest
 
     steps:
+    # 1. 소스 체크아웃
     - name: Checkout source
       uses: actions/checkout@v4
 
-    - name: Install MinGW (for g++)
-      uses: egor-tensin/setup-mingw@v3
+    # 2. MSYS2 설치 및 MinGW-w64 설치
+    - name: Install MSYS2 & MinGW-w64
+      uses: msys2/setup-msys2@v2
       with:
-        platform: x64
+        msystem: UCRT64         # 64-bit UCRT 환경
+        update: true            # 최신 패키지로 업데이트
+        install: mingw-w64-ucrt-x86_64-gcc
 
+    # 3. 빌드
     - name: Build with g++
-      run: g++ -o SerialCommunicator.exe SerialCommunicator.cpp -lws2_32 
+      run: |
+        g++ -o SerialCommunicator.exe SerialCommunicator.cpp -lws2_32
 
-    # ✅ v4 로 업데이트
-    - name: Upload artifact (for debugging)
+    # 4. 아티팩트 업로드 (디버깅용)
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: SerialCommunicator
         path: SerialCommunicator.exe
 
+    # 5. GitHub Release 생성
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
       with:

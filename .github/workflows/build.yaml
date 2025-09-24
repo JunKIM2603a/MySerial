@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'   # v1.0, v2.3 같은 태그 push 시 동작 (Release 트리거)
 
+permissions:
+  contents: write   # GitHub 토큰 권한 지정
+  
 jobs:
   build:
     runs-on: windows-latest

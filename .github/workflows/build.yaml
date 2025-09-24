@@ -1,46 +1,97 @@
-name: Build & Release C++ Windows
+name: Build & Release (Multi-Project)
 
 on:
   push:
     tags:
-      - 'v*'   # v1.0, v2.3 같은 태그 push 시 동작 (Release 트리거)
+      - 'v*'   # v1.0, v2.0 같은 태그 push 시 동작
 
 permissions:
-  contents: write   # GitHub 토큰 권한 지정
-  
+  contents: write
+
 jobs:
-  build:
+  build-MySerial:
     runs-on: windows-latest
-
     steps:
-    # 1. 소스 체크아웃
-    - name: Checkout source
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    # 2. MSYS2 설치 및 MinGW-w64 설치
-    - name: Install MSYS2 & MinGW-w64
-      uses: msys2/setup-msys2@v2
-      with:
-        msystem: UCRT64         # 64-bit UCRT 환경
-        update: true            # 최신 패키지로 업데이트
-        install: mingw-w64-ucrt-x86_64-gcc
+      - name: Install MSYS2 & MinGW-w64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc
 
-    # 3. 빌드
-    - name: Build with g++
-      run: |
-        g++ -o SerialCommunicator.exe SerialCommunicator.cpp -lws2_32
+      - name: Build MySerial
+        working-directory: MySerial
+        run: g++ -o MySerial.exe SerialCommunicator.cpp -lws2_32
 
-    # 4. 아티팩트 업로드 (디버깅용)
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: SerialCommunicator
-        path: SerialCommunicator.exe
+      - name: Rename & Zip MySerial exe with version
+        working-directory: MySerial
+        run: |
+          $version = "${{ github.ref_name }}"
+          Rename-Item MySerial.exe ("MySerial-$version.exe")
+          Compress-Archive -Path "MySerial-$version.exe" -DestinationPath "MySerial-$version.zip"
 
-    # 5. GitHub Release 생성
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v1
-      with:
-        files: SerialCommunicator.exe
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload artifact (MySerial)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MySerial
+          path: |
+            MySerial/MySerial-*.exe
+            MySerial/MySerial-*.zip
+
+  build-MySerial_Pipe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MSYS2 & MinGW-w64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc cmake make
+
+      - name: Configure CMake
+        working-directory: MySerial_Pipe
+        run: cmake -B build -S . -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build MySerial_Pipe
+        working-directory: MySerial_Pipe
+        run: cmake --build build --target consumer -- -j4
+
+      - name: Rename & Zip MySerial_Pipe exe with version
+        working-directory: MySerial_Pipe/build
+        run: |
+          $version = "${{ github.ref_name }}"
+          Rename-Item consumer.exe ("MySerial_Pipe-$version.exe")
+          Compress-Archive -Path "MySerial_Pipe-$version.exe" -DestinationPath "MySerial_Pipe-$version.zip"
+
+      - name: Upload artifact (MySerial_Pipe)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MySerial_Pipe
+          path: |
+            MySerial_Pipe/build/MySerial_Pipe-*.exe
+            MySerial_Pipe/build/MySerial_Pipe-*.zip
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [build-MySerial_Pipe, build-MySerial]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: MySerial_Pipe
+          path: artifacts/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: MySerial
+          path: artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/*.exe
+            artifacts/*.zip

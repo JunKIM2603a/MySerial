@@ -1,0 +1,16 @@
+# VS Code 편집기 설정 파일
+.vscode/
+
+# 운영체제 생성 파일
+.DS_Store
+Thumbs.db
+
+# MySerial 프로젝트 빌드 결과물 및 로그 파일
+# ReadMe.md에 g++로 직접 컴파일하는 내용이 명시되어 있음
+MySerial/*.exe
+MySerial/*.o
+MySerial/serial_log_*.txt
+
+# MySerial_Pipe 프로젝트 빌드 결과물
+# ReadMe.md에 CMake를 사용하여 'build' 디렉터리를 생성한다고 명시되어 있음
+MySerial_Pipe/build/

@@ -14,10 +14,6 @@
 // 로그 파일 스트림
 std::ofstream logFile;
 
-static std::atomic<bool> pipeConnected(false);
-static std::string pipeName = "";
-static HANDLE hPipe = INVALID_HANDLE_VALUE;
-
 // 로그 기록 함수
 void logMessage(const std::string& message) {
     auto t = std::time(nullptr);
@@ -25,15 +21,6 @@ void logMessage(const std::string& message) {
     // 콘솔과 파일에 동시 출력
     logFile << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << " - " << message << std::endl;
     std::cout << message << std::endl;
-
-    if (pipeConnected) {
-    DWORD bytesWritten = 0;
-    bool success = WriteFile(hPipe, message.c_str(), message.length(), &bytesWritten, NULL);
-    if (!success) {
-        std::cerr << "Debug: logWorker - WriteFile to pipe failed. Error: " + std::to_string(GetLastError()) + "\n";
-        pipeConnected = false;
-    }
-}
 }
 
 // ==========================================================
@@ -165,72 +152,6 @@ int main(int argc, char* argv[]) {
     std::string logFileName = "serial_log_" + mode + ".txt";
     logFile.open(logFileName, std::ios_base::app);
 
-    // pipe start
-    bool running = true;
-    pipeName = "\\\\.\\pipe\\MySerial_" + mode + "_" + argv[2];
-    // Replace invalid characters for pipe names, like colons in IPv6
-    std::replace(pipeName.begin(), pipeName.end(), ':', '_'); 
-
-    std::thread pipeThread = std::thread([&](){
-        while(running){
-            if(pipeName.empty()){
-                std::cerr << "Debug: pipeWorker - pipeName is empty, waiting.\n";
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                continue;
-            }
-
-            std::cerr << "Debug: pipeWorker - Creating named pipe.\n";
-            hPipe = CreateNamedPipeA(
-                pipeName.c_str(),
-                PIPE_ACCESS_OUTBOUND,
-                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-                1, // Only one instance
-                4096, // Output buffer size
-                4096, // Input buffer size
-                0,    // Default timeout
-                NULL);
-
-            if (hPipe == INVALID_HANDLE_VALUE) {
-                logMessage("Error: Could not create named pipe. Error: " + std::to_string(GetLastError()));
-                std::cerr << "Debug: pipeWorker - CreateNamedPipe failed, sleeping.\n";
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-                continue;
-            }
-
-            logMessage("Info: Named pipe '" + pipeName + "' created. Waiting for a client to connect...");
-            std::cerr << "Debug: pipeWorker - Calling ConnectNamedPipe.\n";
-            bool connected = ConnectNamedPipe(hPipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
-            std::cerr << "Debug: pipeWorker - ConnectNamedPipe returned. Connected: " + std::to_string(connected) + "\n";
-
-            if (connected && running) {
-                logMessage("Info: Client connected to named pipe '" + pipeName + "'.");
-                pipeConnected = true;
-                while (pipeConnected && running) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
-                std::cerr << "Debug: pipeWorker - Inner connected loop exited.\n";
-            } else {
-                pipeConnected = false;
-                std::cerr << "Debug: pipeWorker - Not connected or running is false.\n";
-            }
-
-            if(hPipe != INVALID_HANDLE_VALUE) {
-                std::cerr << "Debug: pipeWorker - Disconnecting and closing pipe handle.\n";
-                DisconnectNamedPipe(hPipe);
-                CloseHandle(hPipe);
-                hPipe = INVALID_HANDLE_VALUE;
-            }
-
-            if(pipeConnected) {
-                logMessage("Info: Client disconnected from named pipe '" + pipeName + "'.");
-            }
-            pipeConnected = false;
-            std::cerr << "Debug: pipeWorker loop - bottom.\n";
-        }
-        std::cerr << "Debug: pipeWorker finished.\n";
-    });
-
-
     if (mode == "client") {
         if (argc != 6) {
             logMessage("Error: Invalid arguments for client mode.");
@@ -250,25 +171,6 @@ int main(int argc, char* argv[]) {
 
     logFile.close();
 
-    // pipe close
-    running = false;
-    if(!pipeName.empty()){
-        // Create a dummy client to unblock ConnectNamedPipe
-        HANDLE hDummyPipe = CreateFileA(
-            pipeName.c_str(),
-            GENERIC_WRITE,
-            0,
-            NULL,
-            OPEN_EXISTING,
-            0,
-            NULL);
-        if (hDummyPipe != INVALID_HANDLE_VALUE) {
-            CloseHandle(hDummyPipe);
-            logMessage("Debug: stop() - Dummy pipe client created and closed.");
-        } else {
-            logMessage("Warning: stop() - Failed to create dummy pipe client. Error: " + std::to_string(GetLastError()));
-        }
-    }
     return 0;
 }
 

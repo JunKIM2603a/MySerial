@@ -1,0 +1,44 @@
+{
+  "portResults": [
+    {
+      "clientPort": "COM2",
+      "clientResult": {
+        "checksumErrors": 0,
+        "contentMismatches": 0,
+        "cps": 8379.707147947147,
+        "duration": 1.2291599,
+        "expectedBytes": 10300,
+        "expectedPackets": 10,
+        "failureReason": "",
+        "portName": "COM2",
+        "role": "Client",
+        "sequenceErrors": 0,
+        "success": true,
+        "throughput": 0.06703765718357718,
+        "totalBytes": 10300,
+        "totalPackets": 10
+      },
+      "errorMessage": "",
+      "serverPort": "COM1",
+      "serverResult": {
+        "checksumErrors": 0,
+        "contentMismatches": 0,
+        "cps": 8379.707147947147,
+        "duration": 1.2291599,
+        "expectedBytes": 10300,
+        "expectedPackets": 10,
+        "failureReason": "",
+        "portName": "COM1",
+        "role": "Server",
+        "sequenceErrors": 0,
+        "success": true,
+        "throughput": 0.06703765718357718,
+        "totalBytes": 10300,
+        "totalPackets": 10
+      },
+      "success": true
+    }
+  ],
+  "runNumber": 2,
+  "success": true
+}

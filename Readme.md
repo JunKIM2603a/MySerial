@@ -50,3 +50,55 @@
 1.  `consumer.exe`를 실행하여 파이프 데이터 수신을 대기합니다.
 2.  `SerialCommunicator.exe`를 실행하여 직렬 통신을 시작하고, 수신된 데이터를 파이프로 전달하도록 설정합니다.
 3.  `consumer.exe`는 파이프를 통해 들어온 데이터를 화면에 출력하거나 파일로 기록하는 등의 처리를 수행합니다.
+
+
+## Git Tag와 CI/CD 활용 가이드
+
+Git에서 **태그(Tag)**는 배포 버전, 릴리즈, 빌드 식별을 위해 매우 중요합니다.  
+CI/CD 환경에서 태그를 활용하면 자동 빌드, 배포, 버전 관리가 가능합니다.
+
+---
+
+## 1️⃣ Git 태그 종류
+
+### 1. 경량 태그 (Lightweight Tag)
+- 단순히 특정 커밋을 가리키는 이름
+- 예: `v1.0.0`
+- 생성 방법:
+```bash
+git tag v1.0.0
+```
+
+### 2. 주석이 있는 태그 (Annotated Tag)
+- 작성자, 날짜, 메시지 포함
+- 릴리즈용으로 추천
+- 생성 방법:
+```bash
+git tag -a v1.0.0 -m "Release version 1.0.0"
+```
+
+## 2️⃣ 태그 확인
+```bash
+git tag             # 모든 태그 목록 확인
+git show v1.0.0     # 특정 태그 정보 확인
+```
+
+## 3️⃣ 태그 푸시
+- 모든 태그 푸시
+```bash
+git push --tags
+```
+- 특정 태그만 푸시
+```bash
+git push origin v1.0.0
+```
+
+## 5️⃣ Git Flow + 태그
+- Feature → Develop → Release → Main/Master 흐름
+- release 브랜치에서 QA 완료 후 태그
+```bash
+git checkout main
+git merge release/1.0.0
+git tag -a v1.0.0 -m "Release 1.0.0"
+git push origin main --tags
+```

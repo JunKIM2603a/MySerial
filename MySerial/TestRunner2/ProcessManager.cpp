@@ -184,60 +184,89 @@ PortTestResult ProcessManager::ExecutePortPair(const SerialTestConfig& config,
         return result;
     }
 
-    // Start timing for duration/throughput calculation
-    auto testStartTime = std::chrono::high_resolution_clock::now();
-
-    clientOutput = CaptureProcessOutput(clientHandles);
-    CloseProcessHandles(clientHandles);
-
-    auto testEndTime = std::chrono::high_resolution_clock::now();
-    double durationSec = std::chrono::duration<double>(testEndTime - testStartTime).count();
-
-    // Monitor server output until completion
-    bool serverFinished = false;
-    auto serverStartTime = std::chrono::steady_clock::now();
-
-    double serverTimeoutSec = 30.0;
+    // Calculate timeout for both processes
+    double timeoutSec = 30.0;
     if (config.baudrate > 0 && config.numPackets > 0) {
         long long bytesPerFrame = config.dataSize + 6;
         long long totalBytes = bytesPerFrame * config.numPackets * 2;
         double estimatedSec = (totalBytes * 10.0 / static_cast<double>(config.baudrate)) * 1.5;
-        if (estimatedSec > serverTimeoutSec) {
-            serverTimeoutSec = (std::min)(estimatedSec, 600.0);
+        if (estimatedSec > timeoutSec) {
+            timeoutSec = (std::min)(estimatedSec, 600.0);
         }
     }
-    const auto serverTimeout = std::chrono::milliseconds(static_cast<long long>(serverTimeoutSec * 1000.0));
+    const auto timeout = std::chrono::milliseconds(static_cast<long long>(timeoutSec * 1000.0));
 
-    while (!serverFinished &&
-           (std::chrono::steady_clock::now() - serverStartTime < serverTimeout)) {
-        DWORD bytesAvailable = 0;
-        if (PeekNamedPipe(serverHandles.stdOutRead, NULL, 0, NULL, &bytesAvailable, NULL) && bytesAvailable > 0) {
-            CHAR buffer[4096];
-            DWORD bytesRead = 0;
-            if (ReadFile(serverHandles.stdOutRead, buffer, sizeof(buffer) - 1, &bytesRead, NULL)) {
-                buffer[bytesRead] = '\0';
-                serverOutput.append(buffer, bytesRead);
+    // Start timing for duration/throughput calculation
+    auto testStartTime = std::chrono::high_resolution_clock::now();
+    auto startMonitoring = std::chrono::steady_clock::now();
+
+    // Monitor both client and server output simultaneously
+    bool clientFinished = false;
+    bool serverFinished = false;
+
+    while ((!clientFinished || !serverFinished) &&
+           (std::chrono::steady_clock::now() - startMonitoring < timeout)) {
+        
+        // Read client output if still running
+        if (!clientFinished) {
+            DWORD bytesAvailable = 0;
+            if (PeekNamedPipe(clientHandles.stdOutRead, NULL, 0, NULL, &bytesAvailable, NULL) && bytesAvailable > 0) {
+                CHAR buffer[4096];
+                DWORD bytesRead = 0;
+                if (ReadFile(clientHandles.stdOutRead, buffer, sizeof(buffer) - 1, &bytesRead, NULL)) {
+                    buffer[bytesRead] = '\0';
+                    clientOutput.append(buffer, bytesRead);
+                }
+            }
+
+            DWORD exitCode = 0;
+            if (GetExitCodeProcess(clientHandles.processInfo.hProcess, &exitCode)) {
+                if (exitCode != STILL_ACTIVE) {
+                    clientFinished = true;
+                }
             }
         }
 
-        DWORD exitCode = 0;
-        if (GetExitCodeProcess(serverHandles.processInfo.hProcess, &exitCode)) {
-            if (exitCode != STILL_ACTIVE) {
-                serverFinished = true;
-                break;
+        // Read server output if still running
+        if (!serverFinished) {
+            DWORD bytesAvailable = 0;
+            if (PeekNamedPipe(serverHandles.stdOutRead, NULL, 0, NULL, &bytesAvailable, NULL) && bytesAvailable > 0) {
+                CHAR buffer[4096];
+                DWORD bytesRead = 0;
+                if (ReadFile(serverHandles.stdOutRead, buffer, sizeof(buffer) - 1, &bytesRead, NULL)) {
+                    buffer[bytesRead] = '\0';
+                    serverOutput.append(buffer, bytesRead);
+                }
+            }
+
+            DWORD exitCode = 0;
+            if (GetExitCodeProcess(serverHandles.processInfo.hProcess, &exitCode)) {
+                if (exitCode != STILL_ACTIVE) {
+                    serverFinished = true;
+                }
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
-    if (!serverFinished) {
-        serverOutput += "\n[TestRunner2] Server timed out and was terminated.";
-        TerminateProcessIfRunning(serverHandles);
-    }
+    auto testEndTime = std::chrono::high_resolution_clock::now();
+    double durationSec = std::chrono::duration<double>(testEndTime - testStartTime).count();
 
-    // Read remaining output
+    // Read remaining output from both pipes
     DWORD bytesAvailable = 0;
+    while (PeekNamedPipe(clientHandles.stdOutRead, NULL, 0, NULL, &bytesAvailable, NULL) && bytesAvailable > 0) {
+        CHAR buffer[4096];
+        DWORD bytesRead = 0;
+        if (ReadFile(clientHandles.stdOutRead, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
+            buffer[bytesRead] = '\0';
+            clientOutput.append(buffer, bytesRead);
+        } else {
+            break;
+        }
+    }
+
+    bytesAvailable = 0;
     while (PeekNamedPipe(serverHandles.stdOutRead, NULL, 0, NULL, &bytesAvailable, NULL) && bytesAvailable > 0) {
         CHAR buffer[4096];
         DWORD bytesRead = 0;
@@ -249,7 +278,23 @@ PortTestResult ProcessManager::ExecutePortPair(const SerialTestConfig& config,
         }
     }
 
-    WaitForSingleObject(serverHandles.processInfo.hProcess, INFINITE);
+    // Terminate processes if they didn't finish
+    if (!clientFinished) {
+        clientOutput += "\n[TestRunner2] Client timed out and was terminated.";
+        TerminateProcessIfRunning(clientHandles);
+    }
+
+    if (!serverFinished) {
+        serverOutput += "\n[TestRunner2] Server timed out and was terminated.";
+        TerminateProcessIfRunning(serverHandles);
+    }
+
+    // Wait for processes to fully terminate
+    WaitForSingleObject(clientHandles.processInfo.hProcess, 1000);
+    WaitForSingleObject(serverHandles.processInfo.hProcess, 1000);
+
+    // Clean up handles
+    CloseProcessHandles(clientHandles);
     CloseProcessHandles(serverHandles);
 
     result.serverResult = ParseTestSummary(serverOutput,
@@ -306,7 +351,7 @@ bool ProcessManager::LaunchProcess(const std::string& cmdline, ProcessHandles& h
     saAttr.bInheritHandle = TRUE;
     saAttr.lpSecurityDescriptor = NULL;
 
-    if (!CreatePipe(&handles.stdOutRead, &handles.stdOutWrite, &saAttr, 0)) {
+    if (!CreatePipe(&handles.stdOutRead, &handles.stdOutWrite, &saAttr, 65536)) {
         std::cerr << "[ProcessManager] CreatePipe failed" << std::endl;
         return false;
     }

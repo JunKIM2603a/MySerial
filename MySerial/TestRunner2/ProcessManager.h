@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include <utility>
+#include <functional>
 
 #include "Message.h"
 
@@ -27,12 +28,15 @@ struct ProcessHandles {
 
 class ProcessManager {
 public:
+    using RunCompletedCallback = std::function<void(const RunResult&)>;
+
     ProcessManager();
     ~ProcessManager();
 
     bool ExecutePlan(const SerialTestConfig& config,
                      std::vector<RunResult>& results,
-                     std::string& errorMessage);
+                     std::string& errorMessage,
+                     RunCompletedCallback onRunCompleted = nullptr);
 
 private:
     bool ParseComportPairs(const std::string& list,
@@ -58,6 +62,8 @@ private:
     bool WaitForServerReady(ProcessHandles& handles,
                             std::string& accumulatedOutput,
                             int timeoutMs = 10000);
+
+    void PrintSingleRunResult(const RunResult& run) const;
 };
 
 } // namespace TestRunner2

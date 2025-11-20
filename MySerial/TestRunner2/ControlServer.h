@@ -56,6 +56,10 @@ private:
     bool ProcessConfigMessage(SessionContext& ctx, const std::string& payload);
     bool ProcessResultsRequest(SessionContext& ctx, SOCKET socket);
 
+    void PrintServerResults(const std::vector<RunResult>& runs, bool overallSuccess) const;
+    void PrintServerSingleRun(const RunResult& run) const;
+    void PrintServerOverallSummary(const std::vector<RunResult>& runs, bool overallSuccess) const;
+
     int m_controlPort;
     std::string m_serialExecutable;
     SOCKET m_serverSocket;

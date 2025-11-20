@@ -154,6 +154,9 @@ std::string SerializeResultsResponse(const std::vector<RunResult>& results, bool
         json runJson;
         runJson["runNumber"] = run.runNumber;
         runJson["success"] = run.success;
+        runJson["startTime"] = run.startTime;
+        runJson["endTime"] = run.endTime;
+        runJson["totalDuration"] = run.totalDuration;
         runJson["portResults"] = json::array();
         for (const auto& port : run.portResults) {
             runJson["portResults"].push_back(PortResultToJson(port));
@@ -178,6 +181,9 @@ bool DeserializeResultsResponse(const std::string& text,
                 RunResult run;
                 run.runNumber = runJson.value("runNumber", 0);
                 run.success = runJson.value("success", false);
+                run.startTime = runJson.value("startTime", "");
+                run.endTime = runJson.value("endTime", "");
+                run.totalDuration = runJson.value("totalDuration", 0.0);
                 if (runJson.contains("portResults")) {
                     for (const auto& portJson : runJson["portResults"]) {
                         run.portResults.push_back(JsonToPortResult(portJson));
@@ -216,6 +222,44 @@ std::string SerializeHeartbeat() {
     json j;
     j["messageType"] = MessageTypeToString(MessageType::HEARTBEAT);
     return j.dump();
+}
+
+std::string SerializeRunCompleted(const RunResult& runResult) {
+    json j;
+    j["messageType"] = MessageTypeToString(MessageType::RUN_COMPLETED);
+    j["runNumber"] = runResult.runNumber;
+    j["success"] = runResult.success;
+    j["startTime"] = runResult.startTime;
+    j["endTime"] = runResult.endTime;
+    j["totalDuration"] = runResult.totalDuration;
+    j["portResults"] = json::array();
+    for (const auto& port : runResult.portResults) {
+        j["portResults"].push_back(PortResultToJson(port));
+    }
+    return j.dump();
+}
+
+bool DeserializeRunCompleted(const std::string& text, RunResult& runResult) {
+    try {
+        auto j = json::parse(text);
+        if (StringToMessageType(j.value("messageType", "")) != MessageType::RUN_COMPLETED) {
+            return false;
+        }
+        runResult.runNumber = j.value("runNumber", 0);
+        runResult.success = j.value("success", false);
+        runResult.startTime = j.value("startTime", "");
+        runResult.endTime = j.value("endTime", "");
+        runResult.totalDuration = j.value("totalDuration", 0.0);
+        runResult.portResults.clear();
+        if (j.contains("portResults") && j["portResults"].is_array()) {
+            for (const auto& portJson : j["portResults"]) {
+                runResult.portResults.push_back(JsonToPortResult(portJson));
+            }
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 MessageType PeekMessageType(const std::string& text) {

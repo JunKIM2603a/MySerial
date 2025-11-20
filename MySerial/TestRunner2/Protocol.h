@@ -12,7 +12,8 @@ enum class MessageType {
     RESULTS_REQUEST,
     RESULTS_RESPONSE,
     ERROR_MESSAGE,
-    HEARTBEAT
+    HEARTBEAT,
+    RUN_COMPLETED  // 개별 Run 완료 알림
 };
 
 inline std::string MessageTypeToString(MessageType type) {
@@ -24,6 +25,7 @@ inline std::string MessageTypeToString(MessageType type) {
         case MessageType::RESULTS_RESPONSE: return "RESULTS_RESPONSE";
         case MessageType::ERROR_MESSAGE: return "ERROR_MESSAGE";
         case MessageType::HEARTBEAT: return "HEARTBEAT";
+        case MessageType::RUN_COMPLETED: return "RUN_COMPLETED";
         default: return "UNKNOWN";
     }
 }
@@ -36,6 +38,7 @@ inline MessageType StringToMessageType(const std::string& str) {
     if (str == "RESULTS_RESPONSE") return MessageType::RESULTS_RESPONSE;
     if (str == "ERROR_MESSAGE") return MessageType::ERROR_MESSAGE;
     if (str == "HEARTBEAT") return MessageType::HEARTBEAT;
+    if (str == "RUN_COMPLETED") return MessageType::RUN_COMPLETED;
     throw std::runtime_error("Unknown message type: " + str);
 }
 

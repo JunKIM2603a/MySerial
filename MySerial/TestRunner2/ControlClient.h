@@ -38,6 +38,7 @@ private:
     void PrintRunSummaries(const std::vector<RunResult>& runs, bool overallSuccess);
     void SaveRunReports(const std::vector<RunResult>& runs) const;
     void PrintSingleRun(const RunResult& run) const;
+    void PrintOverallSummary(const std::vector<RunResult>& runs, bool overallSuccess) const;
 
     std::string m_serverAddress;
     int m_controlPort;

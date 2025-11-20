@@ -192,6 +192,15 @@ bool ControlClient::Execute(const SerialTestConfig& config) {
                 return false;
             }
             testComplete = true;
+        } else if (type == MessageType::RUN_COMPLETED) {
+            // 개별 Run 완료 시 즉시 결과 출력
+            RunResult runResult;
+            if (DeserializeRunCompleted(message, runResult)) {
+                PrintSingleRun(runResult);
+            } else {
+                std::cerr << "[ControlClient] Failed to parse RUN_COMPLETED message." << std::endl;
+            }
+            // 다음 메시지 대기 계속
         } else if (type == MessageType::HEARTBEAT) {
             SendMessage(SerializeHeartbeat());
         } else if (type == MessageType::ERROR_MESSAGE) {
@@ -254,18 +263,18 @@ bool ControlClient::Execute(const SerialTestConfig& config) {
 }
 
 void ControlClient::PrintRunSummaries(const std::vector<RunResult>& runs, bool overallSuccess) {
-    for (const auto& run : runs) {
-        PrintSingleRun(run);
-    }
-
-    std::cout << "==================================================" << std::endl;
-    std::cout << (overallSuccess ? "SUCCESS: All runs passed." : "WARNING: Some runs failed.") << std::endl;
-    std::cout << "==================================================" << std::endl;
+    // 개별 Run 결과는 이미 RUN_COMPLETED 메시지로 출력됨
+    // 전체 Summary만 출력
+    PrintOverallSummary(runs, overallSuccess);
 }
 
 void ControlClient::PrintSingleRun(const RunResult& run) const {
     std::cout << "\n==================================================" << std::endl;
     std::cout << "Run " << run.runNumber << " Summary" << std::endl;
+    std::cout << "Start Time: " << run.startTime << std::endl;
+    std::cout << "End Time:   " << run.endTime << std::endl;
+    std::cout << "Duration:   " << std::fixed << std::setprecision(2) 
+              << run.totalDuration << " seconds" << std::endl;
     std::cout << "==================================================" << std::endl;
     std::cout << std::left << std::setw(10) << "Role"
               << std::setw(16) << "Port"
@@ -352,6 +361,47 @@ void ControlClient::SaveRunReports(const std::vector<RunResult>& runs) const {
             file << runJson.dump(2);
         }
     }
+}
+
+void ControlClient::PrintOverallSummary(const std::vector<RunResult>& runs, bool overallSuccess) const {
+    std::cout << "\n##################################################" << std::endl;
+    std::cout << "### OVERALL TEST SUMMARY - ALL RUNS ###" << std::endl;
+    std::cout << "##################################################\n" << std::endl;
+    
+    // Run별 요약 테이블
+    std::cout << std::left << std::setw(8) << "Run#"
+              << std::setw(22) << "Start Time"
+              << std::setw(22) << "End Time"
+              << std::setw(12) << "Duration(s)"
+              << std::setw(12) << "Port Pairs"
+              << std::setw(10) << "Status" << std::endl;
+    std::cout << std::string(86, '=') << std::endl;
+    
+    double totalDuration = 0.0;
+    int passedRuns = 0;
+    
+    for (const auto& run : runs) {
+        totalDuration += run.totalDuration;
+        if (run.success) passedRuns++;
+        
+        std::cout << std::left << std::setw(8) << run.runNumber
+                  << std::setw(22) << run.startTime
+                  << std::setw(22) << run.endTime
+                  << std::setw(12) << std::fixed << std::setprecision(2) << run.totalDuration
+                  << std::setw(12) << run.portResults.size()
+                  << std::setw(10) << (run.success ? "PASS" : "FAIL") << std::endl;
+    }
+    
+    std::cout << std::string(86, '=') << std::endl;
+    std::cout << "Total Runs: " << runs.size() 
+              << " | Passed: " << passedRuns 
+              << " | Failed: " << (runs.size() - passedRuns) << std::endl;
+    std::cout << "Total Test Duration: " << std::fixed << std::setprecision(2) 
+              << totalDuration << " seconds" << std::endl;
+    
+    std::cout << "\n##################################################" << std::endl;
+    std::cout << (overallSuccess ? "### FINAL RESULT: SUCCESS ###" : "### FINAL RESULT: FAILED ###") << std::endl;
+    std::cout << "##################################################\n" << std::endl;
 }
 
 } // namespace TestRunner2

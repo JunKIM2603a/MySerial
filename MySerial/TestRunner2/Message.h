@@ -49,6 +49,9 @@ struct RunResult {
     int runNumber = 0;
     bool success = false;
     std::vector<PortTestResult> portResults;
+    std::string startTime;          // 시험 시작 시간 (예: "2025-11-20 23:15:30")
+    std::string endTime;            // 시험 종료 시간
+    double totalDuration = 0.0;     // 전체 소요 시간 (초)
 };
 
 struct MessageEnvelope {
@@ -73,6 +76,9 @@ std::string SerializeError(const std::string& message);
 bool DeserializeError(const std::string& json, std::string& error);
 
 std::string SerializeHeartbeat();
+
+std::string SerializeRunCompleted(const RunResult& runResult);
+bool DeserializeRunCompleted(const std::string& json, RunResult& runResult);
 
 MessageType PeekMessageType(const std::string& json);
 

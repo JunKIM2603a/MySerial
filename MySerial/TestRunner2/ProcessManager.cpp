@@ -6,6 +6,8 @@
 #include <chrono>
 #include <thread>
 #include <vector>
+#include <ctime>
+#include <iomanip>
 
 namespace TestRunner2 {
 
@@ -46,7 +48,8 @@ ProcessManager::~ProcessManager() = default;
 
 bool ProcessManager::ExecutePlan(const SerialTestConfig& config,
                                  std::vector<RunResult>& results,
-                                 std::string& errorMessage) {
+                                 std::string& errorMessage,
+                                 RunCompletedCallback onRunCompleted) {
     std::vector<std::pair<std::string, std::string>> portPairs;
     if (!ParseComportPairs(config.comportList, portPairs, errorMessage)) {
         return false;
@@ -68,6 +71,14 @@ bool ProcessManager::ExecutePlan(const SerialTestConfig& config,
         RunResult runResult = ExecuteSingleRun(config, run, portPairs);
         results.push_back(runResult);
         overallSuccess = overallSuccess && runResult.success;
+
+        // 개별 시험 완료 후 즉시 결과 출력
+        PrintSingleRunResult(runResult);
+
+        // 콜백이 있으면 호출 (클라이언트에게 중간 결과 전송)
+        if (onRunCompleted) {
+            onRunCompleted(runResult);
+        }
 
         if (run < config.repetitions) {
             std::cout << "Waiting 3 seconds before next run..." << std::endl;
@@ -109,6 +120,17 @@ RunResult ProcessManager::ExecuteSingleRun(const SerialTestConfig& config,
     RunResult runResult;
     runResult.runNumber = runIndex;
     runResult.portResults.resize(portPairs.size());
+    
+    // 시작 시간 기록
+    auto startTime = std::chrono::system_clock::now();
+    std::time_t start_time_t = std::chrono::system_clock::to_time_t(startTime);
+    std::tm start_tm;
+    localtime_s(&start_tm, &start_time_t);
+    std::ostringstream startOss;
+    startOss << std::put_time(&start_tm, "%Y-%m-%d %H:%M:%S");
+    runResult.startTime = startOss.str();
+    
+    std::cout << "[ProcessManager] Run " << runIndex << " started at: " << runResult.startTime << std::endl;
 
     std::vector<std::thread> threads;
 
@@ -121,6 +143,23 @@ RunResult ProcessManager::ExecuteSingleRun(const SerialTestConfig& config,
     for (auto& th : threads) {
         th.join();
     }
+
+    // 종료 시간 기록
+    auto endTime = std::chrono::system_clock::now();
+    std::time_t end_time_t = std::chrono::system_clock::to_time_t(endTime);
+    std::tm end_tm;
+    localtime_s(&end_tm, &end_time_t);
+    std::ostringstream endOss;
+    endOss << std::put_time(&end_tm, "%Y-%m-%d %H:%M:%S");
+    runResult.endTime = endOss.str();
+    
+    // 소요 시간 계산
+    std::chrono::duration<double> elapsed = endTime - startTime;
+    runResult.totalDuration = elapsed.count();
+    
+    std::cout << "[ProcessManager] Run " << runIndex << " completed at: " << runResult.endTime 
+              << " (Duration: " << std::fixed << std::setprecision(2) 
+              << runResult.totalDuration << "s)" << std::endl;
 
     runResult.success = true;
     for (const auto& portResult : runResult.portResults) {
@@ -602,6 +641,54 @@ bool ProcessManager::WaitForServerReady(ProcessHandles& handles,
 
     accumulatedOutput += "\n[TestRunner2] Timeout waiting for server ready message.";
     return false;
+}
+
+void ProcessManager::PrintSingleRunResult(const RunResult& run) const {
+    std::cout << "\n==================================================" << std::endl;
+    std::cout << "Run " << run.runNumber << " Summary" << std::endl;
+    std::cout << "Start Time: " << run.startTime << std::endl;
+    std::cout << "End Time:   " << run.endTime << std::endl;
+    std::cout << "Duration:   " << std::fixed << std::setprecision(2) 
+              << run.totalDuration << " seconds" << std::endl;
+    std::cout << "==================================================" << std::endl;
+    std::cout << std::left << std::setw(10) << "Role"
+              << std::setw(16) << "Port"
+              << std::setw(15) << "Duration (s)"
+              << std::setw(18) << "Throughput (Mbps)"
+              << std::setw(16) << "CPS (Bytes/s)"
+              << std::setw(16) << "Total Bytes"
+              << std::setw(16) << "Total Packets"
+              << std::setw(10) << "Status" << std::endl;
+    std::cout << std::string(117, '-') << std::endl;
+
+    auto printResult = [](const TestResult& result) {
+        auto status = (result.success &&
+                       result.totalBytes == result.expectedBytes &&
+                       result.totalPackets == result.expectedPackets &&
+                       result.sequenceErrors == 0 &&
+                       result.checksumErrors == 0 &&
+                       result.contentMismatches == 0) ? "PASS" : "FAIL";
+        std::cout << std::left << std::setw(10) << result.role
+                  << std::setw(16) << result.portName
+                  << std::setw(15) << std::fixed << std::setprecision(2) << result.duration
+                  << std::setw(18) << std::fixed << std::setprecision(2) << result.throughput
+                  << std::setw(16) << std::fixed << std::setprecision(0) << result.cps
+                  << std::setw(16) << result.totalBytes
+                  << std::setw(16) << result.totalPackets
+                  << std::setw(10) << status << std::endl;
+        if (std::string(status) == "FAIL" && !result.failureReason.empty()) {
+            std::cout << "  -> " << result.failureReason << std::endl;
+        }
+    };
+
+    for (const auto& port : run.portResults) {
+        printResult(port.serverResult);
+        printResult(port.clientResult);
+        if (!port.errorMessage.empty()) {
+            std::cout << "  Pair (" << port.serverPort << "," << port.clientPort
+                      << ") error: " << port.errorMessage << std::endl;
+        }
+    }
 }
 
 } // namespace TestRunner2

@@ -1,6 +1,7 @@
 #include "ControlServer.h"
 
 #include <iostream>
+#include <iomanip>
 #include <vector>
 #include <chrono>
 #include <thread>
@@ -168,9 +169,24 @@ void ControlServer::HandleClient(SOCKET clientSocket) {
                     configCopy = ctx.config;
                 }
 
+                // 각 Run 완료 시 클라이언트에게 즉시 전송하는 콜백
+                auto onRunCompleted = [this, &ctx, clientSocket](const RunResult& runResult) {
+                    std::lock_guard<std::mutex> lock(ctx.sendMutex);
+                    if (!SendMessage(clientSocket, SerializeRunCompleted(runResult))) {
+                        std::cerr << "[ControlServer] Failed to send RUN_COMPLETED message for run " 
+                                  << runResult.runNumber << std::endl;
+                    }
+                };
+
                 std::vector<RunResult> runResults;
                 std::string errorMessage;
-                bool success = m_processManager.ExecutePlan(configCopy, runResults, errorMessage);
+                bool success = m_processManager.ExecutePlan(configCopy, runResults, errorMessage, onRunCompleted);
+
+                // 서버 측에도 결과 출력
+                std::cout << "\n##################################################" << std::endl;
+                std::cout << "### SERVER-SIDE RESULTS ###" << std::endl;
+                std::cout << "##################################################\n" << std::endl;
+                PrintServerResults(runResults, success);
 
                 {
                     std::lock_guard<std::mutex> lock(ctx.dataMutex);
@@ -306,6 +322,101 @@ bool ControlServer::ProcessResultsRequest(SessionContext& ctx, SOCKET socket) {
 
     std::lock_guard<std::mutex> lock(ctx.sendMutex);
     return SendMessage(socket, SerializeResultsResponse(resultsCopy, overallSuccess));
+}
+
+void ControlServer::PrintServerResults(const std::vector<RunResult>& runs, bool overallSuccess) const {
+    // 개별 Run 결과는 이미 ProcessManager에서 출력됨
+    // 여기서는 전체 Summary만 출력
+    PrintServerOverallSummary(runs, overallSuccess);
+}
+
+void ControlServer::PrintServerSingleRun(const RunResult& run) const {
+    std::cout << "\n==================================================" << std::endl;
+    std::cout << "Run " << run.runNumber << " Summary" << std::endl;
+    std::cout << "Start Time: " << run.startTime << std::endl;
+    std::cout << "End Time:   " << run.endTime << std::endl;
+    std::cout << "Duration:   " << std::fixed << std::setprecision(2) 
+              << run.totalDuration << " seconds" << std::endl;
+    std::cout << "==================================================" << std::endl;
+    std::cout << std::left << std::setw(10) << "Role"
+              << std::setw(16) << "Port"
+              << std::setw(15) << "Duration (s)"
+              << std::setw(18) << "Throughput (Mbps)"
+              << std::setw(16) << "CPS (Bytes/s)"
+              << std::setw(16) << "Total Bytes"
+              << std::setw(16) << "Total Packets"
+              << std::setw(10) << "Status" << std::endl;
+    std::cout << std::string(117, '-') << std::endl;
+
+    auto printResult = [](const TestResult& result) {
+        auto status = (result.success &&
+                       result.totalBytes == result.expectedBytes &&
+                       result.totalPackets == result.expectedPackets &&
+                       result.sequenceErrors == 0 &&
+                       result.checksumErrors == 0 &&
+                       result.contentMismatches == 0) ? "PASS" : "FAIL";
+        std::cout << std::left << std::setw(10) << result.role
+                  << std::setw(16) << result.portName
+                  << std::setw(15) << std::fixed << std::setprecision(2) << result.duration
+                  << std::setw(18) << std::fixed << std::setprecision(2) << result.throughput
+                  << std::setw(16) << std::fixed << std::setprecision(0) << result.cps
+                  << std::setw(16) << result.totalBytes
+                  << std::setw(16) << result.totalPackets
+                  << std::setw(10) << status << std::endl;
+        if (std::string(status) == "FAIL" && !result.failureReason.empty()) {
+            std::cout << "  -> " << result.failureReason << std::endl;
+        }
+    };
+
+    for (const auto& port : run.portResults) {
+        printResult(port.serverResult);
+        printResult(port.clientResult);
+        if (!port.errorMessage.empty()) {
+            std::cout << "  Pair (" << port.serverPort << "," << port.clientPort
+                      << ") error: " << port.errorMessage << std::endl;
+        }
+    }
+}
+
+void ControlServer::PrintServerOverallSummary(const std::vector<RunResult>& runs, bool overallSuccess) const {
+    std::cout << "\n##################################################" << std::endl;
+    std::cout << "### OVERALL TEST SUMMARY - ALL RUNS ###" << std::endl;
+    std::cout << "##################################################\n" << std::endl;
+    
+    // Run별 요약 테이블
+    std::cout << std::left << std::setw(8) << "Run#"
+              << std::setw(22) << "Start Time"
+              << std::setw(22) << "End Time"
+              << std::setw(12) << "Duration(s)"
+              << std::setw(12) << "Port Pairs"
+              << std::setw(10) << "Status" << std::endl;
+    std::cout << std::string(86, '=') << std::endl;
+    
+    double totalDuration = 0.0;
+    int passedRuns = 0;
+    
+    for (const auto& run : runs) {
+        totalDuration += run.totalDuration;
+        if (run.success) passedRuns++;
+        
+        std::cout << std::left << std::setw(8) << run.runNumber
+                  << std::setw(22) << run.startTime
+                  << std::setw(22) << run.endTime
+                  << std::setw(12) << std::fixed << std::setprecision(2) << run.totalDuration
+                  << std::setw(12) << run.portResults.size()
+                  << std::setw(10) << (run.success ? "PASS" : "FAIL") << std::endl;
+    }
+    
+    std::cout << std::string(86, '=') << std::endl;
+    std::cout << "Total Runs: " << runs.size() 
+              << " | Passed: " << passedRuns 
+              << " | Failed: " << (runs.size() - passedRuns) << std::endl;
+    std::cout << "Total Test Duration: " << std::fixed << std::setprecision(2) 
+              << totalDuration << " seconds" << std::endl;
+    
+    std::cout << "\n##################################################" << std::endl;
+    std::cout << (overallSuccess ? "### FINAL RESULT: SUCCESS ###" : "### FINAL RESULT: FAILED ###") << std::endl;
+    std::cout << "##################################################\n" << std::endl;
 }
 
 } // namespace TestRunner2

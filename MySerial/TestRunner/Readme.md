@@ -94,11 +94,21 @@ TestRunner는 SerialCommunicator.exe 프로그램을 반복적으로 실행하�
 * **반복 테스트 실행**: 지정된 횟수만큼 자동으로 서버/클라이언트 프로세스 실행
 * **멀티노드 테스트**: 여러 COM 포트 쌍을 동시에 테스트
 * **결과 자동 수집**: 각 테스트의 stdout을 캡처하여 통계 추출
-* **상세한 파싱**: "Final Server Report" / "Final Client Report" 섹션을 정밀하게 파싱
+* **Protocol V2 지원**: SerialCommunicator Protocol V2 출력 형식 파싱
 * **엄격한 검증**: 패킷 수, 바이트 수, 에러 수를 검증하여 PASS/FAIL 판정
 * **종합 요약**: 전체 반복에 대한 PASS/FAIL 통계 및 총계 제공
 
-### 최신 개선사항
+### Protocol V2 개선사항 (2025.11)
+* **새 출력 형식 파싱**: `=== Final Server/Client Report ===` 형식 지원
+* **성능 지표 추가**:
+  - **Elapsed Time**: 실제 경과 시간 (초)
+  - **Throughput (MB/s)**: 메가바이트 단위 처리량
+  - **CPS (chars/sec)**: 초당 문자(바이트) 전송 속도
+  - **Retransmit Count**: ACK/NAK 프로토콜 재전송 횟수
+* **구조화된 데이터**: 여러 줄로 구분된 상세 결과 파싱
+* **재전송 통계**: Transmission Results 섹션에서 재전송 횟수 추출
+
+### 기타 기능
 * **동적 타임아웃**: `numPackets`와 `baudrate` 기반으로 서버 대기 시간 자동 계산
 * **무제한 모드 거부**: `numPackets == 0` (무한 전송)은 TestRunner에서 명시적으로 비지원
 * **프로세스 조기 종료 감지**: 서버가 준비 메시지 출력 전에 종료되는 경우 즉시 감지
@@ -108,14 +118,20 @@ TestRunner는 SerialCommunicator.exe 프로그램을 반복적으로 실행하�
 * **상세한 실패 사유**: 파싱 실패 시 정확한 위치와 원인 표시
 * **포트 쌍 지원**: 서버와 클라이언트가 서로 다른 COM 포트를 사용하도록 지원
 
-### 출력 형식
+### 출력 형식 (Protocol V2)
 ```
---- FINAL TEST SUMMARY ---
-Role   COM Port     Duration (s)   Throughput (Mbps)   Total Bytes Rx   Total Packets Rx   Status
----------------------------------------------------------------------------------------------------------
-Server COM3/COM4    0.00           0.00                103000           100                PASS
-Client COM3/COM4    0.00           0.00                103000           100                PASS
+--- FINAL TEST SUMMARY (Protocol V2) ---
+Role    COM Port     Duration(s) Thrput(MB/s) CPS(chars/s)  Bytes Rx        Packets Rx    Retransmit  Status
+--------------------------------------------------------------------------------------------------------------
+Server  COM3/COM4    1.02        0.096        100585        103000          100           0           PASS
+Client  COM3/COM4    1.02        0.096        100980        103000          100           0           PASS
 ```
+
+### 측정 지표 설명
+* **Duration(s)**: 데이터 교환 경과 시간
+* **Thrput(MB/s)**: 메가바이트/초 단위 처리량
+* **CPS(chars/sec)**: 초당 전송된 바이트 수 (실제 전송 속도)
+* **Retransmit**: ACK/NAK 재전송 횟수 (0이 이상적)
 
 ### 참고사항
 * TestRunner는 프로젝트 루트에서 실행해야 합니다 (SerialCommunicator.exe 상대 경로 사용)

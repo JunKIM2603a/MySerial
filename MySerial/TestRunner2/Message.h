@@ -29,6 +29,9 @@ struct TestResult {
     long long sequenceErrors = 0;
     long long checksumErrors = 0;
     long long contentMismatches = 0;
+    int retransmitCount = 0;        // Protocol V2: 재전송 횟수
+    double elapsedSeconds = 0.0;    // Protocol V2: 경과 시간
+    double throughputMBps = 0.0;    // Protocol V2: 처리량 (MB/s)
     std::string failureReason;
     bool success = false;
 };

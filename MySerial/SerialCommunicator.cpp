@@ -12,43 +12,52 @@
 #include <atomic>
 #include <sstream> // for std::ostringstream
 #include <mutex>   // for thread-safe logging
+#include <set>     // for tracking received frames
 
-// ë¡œê·¸ íŒŒì¼ ìŠ¤íŠ¸ë¦¼
+// ·Î±× ÆÄÀÏ ½ºÆ®¸²
 std::ofstream logFile;
-std::mutex logMutex;  // ë¡œê·¸ ë³´í˜¸ìš© mutex
+std::mutex logMutex;  // ·Î±× º¸È£¿ë mutex
 
-// Thread-safe ë¡œê·¸ ê¸°ë¡ í•¨ìˆ˜
+// Thread-safe ·Î±× ±â·Ï ÇÔ¼ö
 void logMessage(const std::string& message) {
     std::lock_guard<std::mutex> lock(logMutex);
     auto t = std::time(nullptr);
     auto tm = *std::localtime(&t);
-    // ì½˜ì†”ê³¼ íŒŒì¼ì— ë™ì‹œ ì¶œë ¥
+    // ÄÜ¼Ö°ú ÆÄÀÏ¿¡ µ¿½Ã Ãâ·Â
     logFile << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << " - " << message << std::endl;
     std::cout << message << std::endl;
 }
 
 // ==========================================================
-// UPDATE: í”„ë ˆì„ êµ¬ì¡° ì •ì˜
+// UPDATE: ÇÁ·¹ÀÓ ±¸Á¶ Á¤ÀÇ
 // ==========================================================
-const char SOF = 0x02;          // Start of Frame (ë°ì´í„° í”„ë ˆì„ìš©)
-const char SOF_ACK = 0x04;      // Start of ACK Frame (EOT, ì œì–´ í”„ë ˆì„ìš©)
+const char SOF = 0x02;          // Start of Frame (µ¥ÀÌÅÍ ÇÁ·¹ÀÓ¿ë)
+const char SOF_ACK = 0x04;      // Start of ACK Frame (EOT, Á¦¾î ÇÁ·¹ÀÓ¿ë)
 const char EOF_BYTE = 0x03;     // End of Frame
-const int FRAME_HEADER_SIZE = sizeof(int); // í”„ë ˆì„ ë²ˆí˜¸ (4 bytes)
+const int FRAME_HEADER_SIZE = sizeof(int); // ÇÁ·¹ÀÓ ¹øÈ£ (4 bytes)
 const int FRAME_OVERHEAD = 1 + FRAME_HEADER_SIZE + 1; // SOF + FrameNum + EOF = 6 bytes
-// ì°¸ê³ : datasize=1024ì¼ ë•Œ í”„ë ˆì„ í¬ê¸° = 1030 bytes
-// Windows ì‹œë¦¬ì–¼ í¬íŠ¸ ê¸°ë³¸ ë²„í¼: ì•½ 64KB-128KB (ì•½ 60-120 í”„ë ˆì„)
+// Âü°í: datasize=1024ÀÏ ¶§ ÇÁ·¹ÀÓ Å©±â = 1030 bytes
+// Windows ½Ã¸®¾ó Æ÷Æ® ±âº» ¹öÆÛ: ¾à 64KB-128KB (¾à 60-120 ÇÁ·¹ÀÓ)
 
 // ==========================================================
-// ë™ê¸°í™” ACK í”„ë¡œí† ì½œ
+// µ¿±âÈ­ ¹× ÀçÀü¼Û ACK/NAK ÇÁ·ÎÅäÄİ
 // ==========================================================
-// ACK í”„ë ˆì„ í˜•ì‹: [SOF_ACK][R][E][A][D][Y][EOF] = 7 bytes
+// READY ACK ÇÁ·¹ÀÓ Çü½Ä: [SOF_ACK][R][E][A][D][Y][EOF] = 7 bytes
 const char READY_ACK[] = {0x04, 'R', 'E', 'A', 'D', 'Y', 0x03};
 const int READY_ACK_LEN = 7;
 
-// Overlapped I/Oë¥¼ ì§€ì›í•˜ëŠ” ì‹œë¦¬ì–¼ í¬íŠ¸ í•¸ë“¤ ê´€ë¦¬ í´ë˜ìŠ¤
+// ÇÁ·¹ÀÓº° ACK/NAK Çü½Ä: [SOF_ACK][TYPE(3bytes)][FrameNum(4bytes)][EOF] = 10 bytes
+const int FRAME_ACK_LEN = 10;
+const int MAX_RETRANSMIT_ATTEMPTS = 3;
+
+// µ¿Àû Å¸ÀÓ¾Æ¿ô °è»ê »ó¼ö
+const double TIMEOUT_SAFETY_FACTOR = 3.0;  // ¾ÈÀü ¿©À¯À²
+const int BASE_TIMEOUT_MS = 1000;           // ±âº» Å¸ÀÓ¾Æ¿ô (ms)
+
+// Overlapped I/O¸¦ Áö¿øÇÏ´Â ½Ã¸®¾ó Æ÷Æ® ÇÚµé °ü¸® Å¬·¡½º
 class SerialPort {
 public:
-    SerialPort() : hComm(INVALID_HANDLE_VALUE), readEvent(NULL), writeEvent(NULL) {
+    SerialPort() : hComm(INVALID_HANDLE_VALUE), readEvent(NULL), writeEvent(NULL), baudRate(0) {
         ZeroMemory(&readOverlapped, sizeof(OVERLAPPED));
         ZeroMemory(&writeOverlapped, sizeof(OVERLAPPED));
     }
@@ -60,17 +69,50 @@ public:
             CloseHandle(hComm);
         }
     }
+    
+    // ¹öÆÛ ÇÃ·¯½Ì ÇÔ¼ö
+    bool flush() {
+        std::lock_guard<std::mutex> lockRead(readMutex);
+        std::lock_guard<std::mutex> lockWrite(writeMutex);
+        
+        if (hComm == INVALID_HANDLE_VALUE) return false;
+        
+        DWORD flags = PURGE_RXCLEAR | PURGE_TXCLEAR | PURGE_RXABORT | PURGE_TXABORT;
+        if (!PurgeComm(hComm, flags)) {
+            logMessage("Warning: Failed to flush serial buffers");
+            return false;
+        }
+        logMessage("Serial buffers flushed.");
+        return true;
+    }
+    
+    // µ¿Àû Å¸ÀÓ¾Æ¿ô °è»ê ÇÔ¼ö
+    DWORD calculateTimeout(int dataSize) const {
+        if (baudRate == 0) return 30000;  // fallback
+        
+        // Àü¼Û ½Ã°£ = (dataSize * 10 bits) / baudrate * 1000 (ms º¯È¯) * safetyFactor + base
+        double transmitTime = (static_cast<double>(dataSize) * 10.0 / baudRate) * 1000.0 * TIMEOUT_SAFETY_FACTOR;
+        DWORD timeout = static_cast<DWORD>(transmitTime) + BASE_TIMEOUT_MS;
+        
+        // ÃÖ¼Ò 2ÃÊ, ÃÖ´ë 60ÃÊ
+        if (timeout < 2000) timeout = 2000;
+        if (timeout > 60000) timeout = 60000;
+        
+        return timeout;
+    }
+    
+    int getBaudRate() const { return baudRate; }
 
     bool open(const std::string& comport, int baudrate) {
         std::string portName = "\\\\.\\" + comport;
         
-        // FILE_FLAG_OVERLAPPED í”Œë˜ê·¸ë¡œ ë¹„ë™ê¸° I/O í™œì„±í™”
+        // FILE_FLAG_OVERLAPPED ÇÃ·¡±×·Î ºñµ¿±â I/O È°¼ºÈ­
         hComm = CreateFileA(portName.c_str(),
                             GENERIC_READ | GENERIC_WRITE,
                             0,
                             NULL,
                             OPEN_EXISTING,
-                            FILE_FLAG_OVERLAPPED,  // Overlapped I/O í™œì„±í™”
+                            FILE_FLAG_OVERLAPPED,  // Overlapped I/O È°¼ºÈ­
                             NULL);
 
         if (hComm == INVALID_HANDLE_VALUE) {
@@ -78,7 +120,7 @@ public:
             return false;
         }
 
-        // ì´ë²¤íŠ¸ ê°ì²´ ìƒì„± (ë¹„ë™ê¸° I/O ì™„ë£Œ ì‹ í˜¸ìš©)
+        // ÀÌº¥Æ® °´Ã¼ »ı¼º (ºñµ¿±â I/O ¿Ï·á ½ÅÈ£¿ë)
         readEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
         writeEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
         
@@ -114,7 +156,7 @@ public:
             return false;
         }
 
-        // Overlapped I/Oì—ì„œëŠ” íƒ€ì„ì•„ì›ƒì„ 0ìœ¼ë¡œ ì„¤ì • (ì´ë²¤íŠ¸ ê¸°ë°˜)
+        // Overlapped I/O¿¡¼­´Â Å¸ÀÓ¾Æ¿ôÀ» 0À¸·Î ¼³Á¤ (ÀÌº¥Æ® ±â¹İ)
         COMMTIMEOUTS timeouts = { 0 };
         timeouts.ReadIntervalTimeout = 0;
         timeouts.ReadTotalTimeoutConstant = 0;
@@ -129,18 +171,35 @@ public:
             return false;
         }
 
-        // ë²„í¼ í¬ê¸° ì„¤ì • (128KBë¡œ ì¦ê°€)
+        // ¹öÆÛ Å©±â ¼³Á¤ (128KB·Î Áõ°¡)
         if (!SetupComm(hComm, 131072, 131072)) {
             logMessage("Warning: Failed to set buffer size");
+        }
+
+        // baudrate ÀúÀå (Å¸ÀÓ¾Æ¿ô °è»ê¿ë)
+        baudRate = baudrate;
+        
+        // Æ÷Æ® ¿ÀÇÂ ÈÄ ¹öÆÛ ÃÊ±âÈ­
+        DWORD flags = PURGE_RXCLEAR | PURGE_TXCLEAR | PURGE_RXABORT | PURGE_TXABORT;
+        if (!PurgeComm(hComm, flags)) {
+            logMessage("Warning: Failed to purge buffers on open");
+        } else {
+            logMessage("Port buffers purged on open.");
         }
 
         return true;
     }
 
     int write(const char* buffer, int length) {
+        std::lock_guard<std::mutex> lock(writeMutex);
+        
         if (hComm == INVALID_HANDLE_VALUE) return -1;
 
         DWORD bytesWritten = 0;
+        
+        // OVERLAPPED ±¸Á¶Ã¼ ÃÊ±âÈ­
+        ZeroMemory(&writeOverlapped, sizeof(OVERLAPPED));
+        writeOverlapped.hEvent = writeEvent;
         ResetEvent(writeOverlapped.hEvent);
         
         BOOL result = WriteFile(hComm, buffer, length, &bytesWritten, &writeOverlapped);
@@ -148,15 +207,16 @@ public:
         if (!result) {
             DWORD error = GetLastError();
             if (error == ERROR_IO_PENDING) {
-                // ë¹„ë™ê¸° ì‘ì—… ì§„í–‰ ì¤‘ - ì™„ë£Œ ëŒ€ê¸° (ìµœëŒ€ 30ì´ˆ)
-                DWORD waitResult = WaitForSingleObject(writeOverlapped.hEvent, 30000);
+                // µ¿Àû Å¸ÀÓ¾Æ¿ô °è»ê
+                DWORD timeout = calculateTimeout(length);
+                DWORD waitResult = WaitForSingleObject(writeOverlapped.hEvent, timeout);
                 
                 if (waitResult == WAIT_OBJECT_0) {
                     if (GetOverlappedResult(hComm, &writeOverlapped, &bytesWritten, FALSE)) {
                         return bytesWritten;
                     }
                 } else if (waitResult == WAIT_TIMEOUT) {
-                    logMessage("Error: Write timeout");
+                    logMessage("Error: Write timeout (" + std::to_string(timeout) + "ms)");
                     CancelIo(hComm);
                     return -1;
                 }
@@ -168,15 +228,26 @@ public:
         return bytesWritten;
     }
     
-    int read(char* buffer, int length) {
+    int read(char* buffer, int length, DWORD timeoutMs = 0) {
+        std::lock_guard<std::mutex> lock(readMutex);
+        
         if (hComm == INVALID_HANDLE_VALUE) return -1;
 
         DWORD totalBytesRead = 0;
         int timeoutCount = 0;
-        const int MAX_TIMEOUT_RETRIES = 3;  // ìµœëŒ€ 3ë²ˆ ì¬ì‹œë„
+        const int MAX_TIMEOUT_RETRIES = 3;
+        
+        // Å¸ÀÓ¾Æ¿ôÀÌ ÁöÁ¤µÇÁö ¾ÊÀ¸¸é µ¿Àû °è»ê
+        if (timeoutMs == 0) {
+            timeoutMs = calculateTimeout(length);
+        }
         
         while (totalBytesRead < length) {
             DWORD bytesReadInThisCall = 0;
+            
+            // OVERLAPPED ±¸Á¶Ã¼ ÃÊ±âÈ­
+            ZeroMemory(&readOverlapped, sizeof(OVERLAPPED));
+            readOverlapped.hEvent = readEvent;
             ResetEvent(readOverlapped.hEvent);
             
             BOOL result = ReadFile(hComm, 
@@ -188,18 +259,16 @@ public:
             if (!result) {
                 DWORD error = GetLastError();
                 if (error == ERROR_IO_PENDING) {
-                    // ë¹„ë™ê¸° ì‘ì—… ì§„í–‰ ì¤‘ - ì™„ë£Œ ëŒ€ê¸° (ìµœëŒ€ 30ì´ˆ)
-                    DWORD waitResult = WaitForSingleObject(readOverlapped.hEvent, 30000);
+                    DWORD waitResult = WaitForSingleObject(readOverlapped.hEvent, timeoutMs);
                     
                     if (waitResult == WAIT_OBJECT_0) {
                         if (GetOverlappedResult(hComm, &readOverlapped, &bytesReadInThisCall, FALSE)) {
                             if (bytesReadInThisCall > 0) {
                                 totalBytesRead += bytesReadInThisCall;
-                                timeoutCount = 0;  // ë°ì´í„°ë¥¼ ë°›ì•˜ìœ¼ë¯€ë¡œ ì¹´ìš´í„° ë¦¬ì…‹
+                                timeoutCount = 0;
                             } else {
-                                // ë°ì´í„°ê°€ ì—†ìœ¼ë©´ ì¬ì‹œë„ ì „ì— ì§§ì€ ëŒ€ê¸°
                                 if (totalBytesRead == 0 || timeoutCount >= MAX_TIMEOUT_RETRIES) {
-                                    break;  // ì²˜ìŒë¶€í„° ë°ì´í„° ì—†ê±°ë‚˜ ì¬ì‹œë„ í•œê³„
+                                    break;
                                 }
                                 timeoutCount++;
                                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -209,14 +278,12 @@ public:
                             return -1;
                         }
                     } else if (waitResult == WAIT_TIMEOUT) {
-                        // íƒ€ì„ì•„ì›ƒ ë°œìƒ ì‹œ, ì´ë¯¸ ì¼ë¶€ ë°ì´í„°ë¥¼ ë°›ì•˜ë‹¤ë©´ ë°˜í™˜
                         if (totalBytesRead > 0) {
                             logMessage("Warning: Read timeout but returning partial data (" + 
                                       std::to_string(totalBytesRead) + " bytes)");
                             break;
                         }
-                        // ì²˜ìŒë¶€í„° íƒ€ì„ì•„ì›ƒì´ë©´ ì—ëŸ¬
-                        logMessage("Error: Read timeout");
+                        logMessage("Error: Read timeout (" + std::to_string(timeoutMs) + "ms)");
                         CancelIo(hComm);
                         break;
                     }
@@ -225,7 +292,6 @@ public:
                     return -1;
                 }
             } else {
-                // ì¦‰ì‹œ ì™„ë£Œëœ ê²½ìš°
                 if (bytesReadInThisCall > 0) {
                     totalBytesRead += bytesReadInThisCall;
                     timeoutCount = 0;
@@ -237,33 +303,87 @@ public:
         
         return totalBytesRead;
     }
+    
+    // ÇÁ·¹ÀÓ Àçµ¿±âÈ­ ÇÔ¼ö: SOF¸¦ Ã£¾Æ ÇÁ·¹ÀÓ ½ÃÀÛ À§Ä¡ º¹±¸
+    bool findFrameStart(int maxSearchBytes = 10240) {
+        std::lock_guard<std::mutex> lock(readMutex);
+        
+        if (hComm == INVALID_HANDLE_VALUE) return false;
+        
+        logMessage("Attempting frame resynchronization...");
+        char byte;
+        int searchCount = 0;
+        
+        while (searchCount < maxSearchBytes) {
+            DWORD bytesRead = 0;
+            ZeroMemory(&readOverlapped, sizeof(OVERLAPPED));
+            readOverlapped.hEvent = readEvent;
+            ResetEvent(readOverlapped.hEvent);
+            
+            BOOL result = ReadFile(hComm, &byte, 1, &bytesRead, &readOverlapped);
+            
+            if (!result && GetLastError() == ERROR_IO_PENDING) {
+                DWORD waitResult = WaitForSingleObject(readOverlapped.hEvent, 1000);
+                if (waitResult == WAIT_OBJECT_0) {
+                    GetOverlappedResult(hComm, &readOverlapped, &bytesRead, FALSE);
+                } else {
+                    logMessage("Frame resync timeout.");
+                    return false;
+                }
+            }
+            
+            if (bytesRead == 1) {
+                if (byte == SOF) {
+                    logMessage("Frame start (SOF) found after " + std::to_string(searchCount) + " bytes.");
+                    return true;
+                }
+                searchCount++;
+            } else {
+                break;
+            }
+        }
+        
+        logMessage("Frame resync failed: SOF not found within " + std::to_string(maxSearchBytes) + " bytes.");
+        return false;
+    }
 
 private:
     HANDLE hComm;
-    OVERLAPPED readOverlapped;   // ì½ê¸° ì‘ì—…ìš© OVERLAPPED êµ¬ì¡°ì²´
-    OVERLAPPED writeOverlapped;  // ì“°ê¸° ì‘ì—…ìš© OVERLAPPED êµ¬ì¡°ì²´
-    HANDLE readEvent;            // ì½ê¸° ì™„ë£Œ ì´ë²¤íŠ¸
-    HANDLE writeEvent;           // ì“°ê¸° ì™„ë£Œ ì´ë²¤íŠ¸
+    OVERLAPPED readOverlapped;   // ÀĞ±â ÀÛ¾÷¿ë OVERLAPPED ±¸Á¶Ã¼
+    OVERLAPPED writeOverlapped;  // ¾²±â ÀÛ¾÷¿ë OVERLAPPED ±¸Á¶Ã¼
+    HANDLE readEvent;            // ÀĞ±â ¿Ï·á ÀÌº¥Æ®
+    HANDLE writeEvent;           // ¾²±â ¿Ï·á ÀÌº¥Æ®
+    std::mutex readMutex;        // ÀĞ±â ÀÛ¾÷ º¸È£¿ë mutex
+    std::mutex writeMutex;       // ¾²±â ÀÛ¾÷ º¸È£¿ë mutex
+    int baudRate;                // Å¸ÀÓ¾Æ¿ô °è»ê¿ë baudrate ÀúÀå
 };
 
-// ì„¤ì • ì •ë³´ êµ¬ì¡°ì²´
+// ¼³Á¤ Á¤º¸ ±¸Á¶Ã¼ (¹öÀü 2)
 struct Settings {
-    int datasize; // Payload size
-    int num;
+    int protocolVersion;  // ÇÁ·ÎÅäÄİ ¹öÀü (ÇöÀç: 2)
+    int datasize;         // Payload size
+    int num;              // ÇÁ·¹ÀÓ °³¼ö
+    int reserved;         // ÇâÈÄ È®Àå¿ë
 };
 
-// ê²°ê³¼ ì •ë³´ êµ¬ì¡°ì²´
+const int PROTOCOL_VERSION = 2;
+
+// °á°ú Á¤º¸ ±¸Á¶Ã¼ (È®Àå ¹öÀü)
 struct Results {
-    long long totalReceivedBytes;
-    int receivedNum;
-    int errorCount;
+    long long totalReceivedBytes;  // ÃÑ ¼ö½Å ¹ÙÀÌÆ®
+    int receivedNum;               // ¼º°øÀûÀ¸·Î ¼ö½ÅÇÑ ÇÁ·¹ÀÓ °³¼ö
+    int errorCount;                // ¿¡·¯ ¹ß»ı È½¼ö
+    int retransmitCount;           // ÀçÀü¼Û È½¼ö
+    double elapsedSeconds;         // °æ°ú ½Ã°£ (ÃÊ)
+    double throughputMBps;         // Ã³¸®·® (MB/s)
+    double charactersPerSecond;    // CPS: ÃÊ´ç ¹®ÀÚ(¹ÙÀÌÆ®) ¼ö
 };
 
 // ==========================================================
-// ë™ê¸°í™” ACK í•¨ìˆ˜
+// µ¿±âÈ­ ACK ÇÔ¼ö
 // ==========================================================
 
-// READY ACK ì „ì†¡ í•¨ìˆ˜
+// READY ACK Àü¼Û ÇÔ¼ö
 bool sendReadyAck(SerialPort& serial) {
     int sent = serial.write(READY_ACK, READY_ACK_LEN);
     if (sent == READY_ACK_LEN) {
@@ -274,20 +394,20 @@ bool sendReadyAck(SerialPort& serial) {
     return false;
 }
 
-// READY ACK ìˆ˜ì‹  í•¨ìˆ˜ (íƒ€ì„ì•„ì›ƒ 30ì´ˆ, ëŠë¦° ì£¼ê¸°ë¡œ ì²´í¬)
+// READY ACK ¼ö½Å ÇÔ¼ö (Å¸ÀÓ¾Æ¿ô 30ÃÊ, ´À¸° ÁÖ±â·Î Ã¼Å©)
 bool waitForReadyAck(SerialPort& serial) {
     logMessage("Waiting for READY ACK...");
     
     char ackBuffer[10];
     int attempts = 0;
-    const int MAX_ATTEMPTS = 300;  // 30ì´ˆ (ê° ì‹œë„ë§ˆë‹¤ 100ms)
+    const int MAX_ATTEMPTS = 300;  // 30ÃÊ (°¢ ½Ãµµ¸¶´Ù 100ms)
     
     while (attempts < MAX_ATTEMPTS) {
-        // ACK í”„ë ˆì„ í¬ê¸°ë¡œ ì½ê¸° ì‹œë„ (7 bytes)
-        int received = serial.read(ackBuffer, READY_ACK_LEN);
+        // ACK ÇÁ·¹ÀÓ Å©±â·Î ÀĞ±â ½Ãµµ (7 bytes, ÂªÀº Å¸ÀÓ¾Æ¿ô)
+        int received = serial.read(ackBuffer, READY_ACK_LEN, 100);
         
         if (received == READY_ACK_LEN) {
-            // ACK í”„ë ˆì„ ê²€ì¦: [SOF_ACK][READY][EOF]
+            // ACK ÇÁ·¹ÀÓ °ËÁõ: [SOF_ACK][READY][EOF]
             if (ackBuffer[0] == SOF_ACK && 
                 ackBuffer[1] == 'R' && 
                 ackBuffer[2] == 'E' && 
@@ -298,12 +418,12 @@ bool waitForReadyAck(SerialPort& serial) {
                 logMessage("READY ACK received.");
                 return true;
             } else {
-                // ì˜ëª»ëœ ë°ì´í„° ìˆ˜ì‹  (ì§€ì—°ëœ í”„ë ˆì„ ë°ì´í„°ì¼ ê°€ëŠ¥ì„±)
+                // Àß¸øµÈ µ¥ÀÌÅÍ ¼ö½Å (Áö¿¬µÈ ÇÁ·¹ÀÓ µ¥ÀÌÅÍÀÏ °¡´É¼º)
                 logMessage("Warning: Received unexpected data while waiting for ACK (SOF=" + 
                           std::to_string((unsigned char)ackBuffer[0]) + "), ignoring...");
             }
         } else if (received > 0 && received < READY_ACK_LEN) {
-            // ë¶€ë¶„ ìˆ˜ì‹  - ì˜ëª»ëœ ë°ì´í„°ì¼ ê°€ëŠ¥ì„±
+            // ºÎºĞ ¼ö½Å - Àß¸øµÈ µ¥ÀÌÅÍÀÏ °¡´É¼º
             logMessage("Warning: Partial data received (" + std::to_string(received) + 
                       " bytes) while waiting for ACK, ignoring...");
         }
@@ -314,6 +434,75 @@ bool waitForReadyAck(SerialPort& serial) {
     
     logMessage("Error: Timeout waiting for READY ACK (30 seconds).");
     return false;
+}
+
+// ==========================================================
+// ÇÁ·¹ÀÓº° ACK/NAK ÇÁ·ÎÅäÄİ ÇÔ¼ö
+// ==========================================================
+
+// ACK ÇÁ·¹ÀÓ Àü¼Û: [SOF_ACK]['A']['C']['K'][FrameNum(4bytes)][EOF]
+bool sendFrameAck(SerialPort& serial, int frameNum) {
+    char ackFrame[FRAME_ACK_LEN];
+    ackFrame[0] = SOF_ACK;
+    ackFrame[1] = 'A';
+    ackFrame[2] = 'C';
+    ackFrame[3] = 'K';
+    memcpy(&ackFrame[4], &frameNum, sizeof(int));
+    ackFrame[9] = EOF_BYTE;
+    
+    int sent = serial.write(ackFrame, FRAME_ACK_LEN);
+    return (sent == FRAME_ACK_LEN);
+}
+
+// NAK ÇÁ·¹ÀÓ Àü¼Û: [SOF_ACK]['N']['A']['K'][FrameNum(4bytes)][EOF]
+bool sendFrameNak(SerialPort& serial, int frameNum) {
+    char nakFrame[FRAME_ACK_LEN];
+    nakFrame[0] = SOF_ACK;
+    nakFrame[1] = 'N';
+    nakFrame[2] = 'A';
+    nakFrame[3] = 'K';
+    memcpy(&nakFrame[4], &frameNum, sizeof(int));
+    nakFrame[9] = EOF_BYTE;
+    
+    int sent = serial.write(nakFrame, FRAME_ACK_LEN);
+    return (sent == FRAME_ACK_LEN);
+}
+
+// ACK/NAK ÇÁ·¹ÀÓ ¼ö½Å ¹× ÆÄ½Ì
+// ¹İÈ¯°ª: 1=ACK, 0=NAK, -1=Å¸ÀÓ¾Æ¿ô/¿¡·¯
+int waitForFrameAck(SerialPort& serial, int expectedFrameNum, int timeoutMs = 5000) {
+    char ackBuffer[FRAME_ACK_LEN];
+    int received = serial.read(ackBuffer, FRAME_ACK_LEN, timeoutMs);
+    
+    if (received != FRAME_ACK_LEN) {
+        return -1;  // Å¸ÀÓ¾Æ¿ô ¶Ç´Â ºÒ¿ÏÀüÇÑ ¼ö½Å
+    }
+    
+    // ÇÁ·¹ÀÓ Çü½Ä °ËÁõ
+    if (ackBuffer[0] != SOF_ACK || ackBuffer[9] != EOF_BYTE) {
+        logMessage("Warning: Invalid ACK/NAK frame format");
+        return -1;
+    }
+    
+    // ÇÁ·¹ÀÓ ¹øÈ£ È®ÀÎ
+    int receivedFrameNum;
+    memcpy(&receivedFrameNum, &ackBuffer[4], sizeof(int));
+    
+    if (receivedFrameNum != expectedFrameNum) {
+        logMessage("Warning: Frame number mismatch in ACK/NAK (expected " + 
+                  std::to_string(expectedFrameNum) + ", got " + std::to_string(receivedFrameNum) + ")");
+        return -1;
+    }
+    
+    // ACKÀÎÁö NAKÀÎÁö È®ÀÎ
+    if (ackBuffer[1] == 'A' && ackBuffer[2] == 'C' && ackBuffer[3] == 'K') {
+        return 1;  // ACK
+    } else if (ackBuffer[1] == 'N' && ackBuffer[2] == 'A' && ackBuffer[3] == 'K') {
+        return 0;  // NAK
+    }
+    
+    logMessage("Warning: Unknown ACK/NAK type");
+    return -1;
 }
 
 void clientMode(const std::string& comport, int baudrate, int datasize, int num);
@@ -372,23 +561,24 @@ int main(int argc, char* argv[]) {
 }
 
 void clientMode(const std::string& comport, int baudrate, int datasize, int num) {
-    logMessage("--- Client Mode ---");
+    logMessage("--- Client Mode (Protocol V" + std::to_string(PROTOCOL_VERSION) + ") ---");
     SerialPort serial;
     if (!serial.open(comport, baudrate)) {
         return;
     }
     logMessage("Port " + comport + " opened successfully at " + std::to_string(baudrate) + " bps.");
 
-    // 3. í´ë¼ì´ì–¸íŠ¸ëŠ” ì„œë²„ë¡œ ì˜µì…˜ì„ ì „ë‹¬
-    Settings settings = {datasize, num};
+    // 3. Å¬¶óÀÌ¾ğÆ®´Â ¼­¹ö·Î ¿É¼ÇÀ» Àü´Ş (ÇÁ·ÎÅäÄİ ¹öÀü Æ÷ÇÔ)
+    Settings settings = {PROTOCOL_VERSION, datasize, num, 0};
     logMessage("Attempting to send settings to server...");
     if (serial.write(reinterpret_cast<char*>(&settings), sizeof(Settings)) != sizeof(Settings)) {
         logMessage("Error: Failed to send settings to server.");
         return;
     }
-    logMessage("Settings sent to server: datasize=" + std::to_string(datasize) + ", num=" + std::to_string(num));
+    logMessage("Settings sent to server: protocolVersion=" + std::to_string(PROTOCOL_VERSION) + 
+               ", datasize=" + std::to_string(datasize) + ", num=" + std::to_string(num));
 
-    // 5. ì„œë²„ë¡œë¶€í„° ACK ë©”ì‹œì§€ ìˆ˜ì‹ 
+    // 5. ¼­¹ö·ÎºÎÅÍ ACK ¸Ş½ÃÁö ¼ö½Å
     logMessage("Waiting for ACK from server...");
     char ack[4];
     int bytesRead = serial.read(ack, 3);
@@ -403,18 +593,19 @@ void clientMode(const std::string& comport, int baudrate, int datasize, int num)
     }
     logMessage("ACK received from server.");
     
-    // 6 & 8. ë°ì´í„° ì†¡ìˆ˜ì‹  ë° ë¬´ê²°ì„± ê²€ì‚¬ (ì†¡ìˆ˜ì‹  ë™ì‹œ ì§„í–‰)
+    // 6 & 8. µ¥ÀÌÅÍ ¼Û¼ö½Å ¹× ¹«°á¼º °Ë»ç (Half-Duplex: ¼øÂ÷ ¼Û¼ö½Å)
     const int frameSize = datasize + FRAME_OVERHEAD;
     std::vector<char> sendFrame(frameSize);
     std::vector<char> receiveFrame(frameSize);
-    Results clientResults = {0, 0, 0};
+    Results clientResults = {0, 0, 0, 0, 0.0, 0.0, 0.0};
     
-    // ìŠ¤ë ˆë“œ ì™„ë£Œ í”Œë˜ê·¸
-    std::atomic<bool> senderDone(false);
-    std::atomic<bool> receiverDone(false);
+    // ¼º´É ÃøÁ¤ ½ÃÀÛ
+    auto startTime = std::chrono::high_resolution_clock::now();
 
-    auto sender = [&]() {
-        // í”„ë ˆì„ êµ¬ì„±
+    // ===== Phase 1: Å¬¶óÀÌ¾ğÆ®°¡ µ¥ÀÌÅÍ ¼Û½Å =====
+    logMessage("Phase 1: Client sending data...");
+    {
+        // ÇÁ·¹ÀÓ ±¸¼º (Å¬¶óÀÌ¾ğÆ®´Â 0-255 ÆĞÅÏ)
         sendFrame[0] = SOF;
         for (int j = 0; j < datasize; ++j) {
             sendFrame[1 + FRAME_HEADER_SIZE + j] = static_cast<char>(j % 256);
@@ -423,33 +614,76 @@ void clientMode(const std::string& comport, int baudrate, int datasize, int num)
 
         for (int i = 0; i < num; ++i) {
             memcpy(&sendFrame[1], &i, FRAME_HEADER_SIZE);
-            if (serial.write(sendFrame.data(), frameSize) != frameSize) {
-                logMessage("Error sending frame " + std::to_string(i));
-            } else {
-                 logMessage("Sending frame " + std::to_string(i) + "...");
+            
+            bool frameSent = false;
+            int attempts = 0;
+            
+            while (!frameSent && attempts < MAX_RETRANSMIT_ATTEMPTS) {
+                // ÇÁ·¹ÀÓ Àü¼Û
+                if (serial.write(sendFrame.data(), frameSize) != frameSize) {
+                    logMessage("Error sending frame " + std::to_string(i) + " (attempt " + std::to_string(attempts + 1) + ")");
+                    attempts++;
+                    clientResults.retransmitCount++;
+                    continue;
+                }
+                
+                // ACK/NAK ´ë±â
+                int ackResult = waitForFrameAck(serial, i, 5000);
+                
+                if (ackResult == 1) {
+                    // ACK ¼ö½Å ¼º°ø
+                    frameSent = true;
+                    if (i % 100 == 0 || i < 10) {
+                        logMessage("Frame " + std::to_string(i) + " sent and ACKed.");
+                    }
+                } else if (ackResult == 0) {
+                    // NAK ¼ö½Å - ÀçÀü¼Û ÇÊ¿ä
+                    logMessage("Frame " + std::to_string(i) + " NAKed, retransmitting (attempt " + std::to_string(attempts + 1) + ")");
+                    attempts++;
+                    clientResults.retransmitCount++;
+                } else {
+                    // Å¸ÀÓ¾Æ¿ô - ÀçÀü¼Û ½Ãµµ
+                    logMessage("Frame " + std::to_string(i) + " ACK timeout, retransmitting (attempt " + std::to_string(attempts + 1) + ")");
+                    attempts++;
+                    clientResults.retransmitCount++;
+                }
+            }
+            
+            if (!frameSent) {
+                logMessage("Error: Failed to send frame " + std::to_string(i) + " after " + std::to_string(MAX_RETRANSMIT_ATTEMPTS) + " attempts.");
+                clientResults.errorCount++;
             }
         }
-        senderDone = true;  // ì†¡ì‹  ì™„ë£Œ í‘œì‹œ
-        logMessage("Sender thread completed.");
-    };
+        logMessage("Phase 1 complete: All frames sent.");
+    }
 
-    auto receiver = [&]() {
+    // ===== Phase 2: Å¬¶óÀÌ¾ğÆ®°¡ µ¥ÀÌÅÍ ¼ö½Å =====
+    logMessage("Phase 2: Client receiving data...");
+    {
         std::vector<char> expectedPayload(datasize);
+        // ¼­¹ö¿¡¼­ ¿À´Â ÆĞÅÏ: 255 - (j % 256)
         for (int j = 0; j < datasize; ++j) {
             expectedPayload[j] = static_cast<char>(255 - (j % 256));
         }
+        
+        std::set<int> receivedFrames;  // Áßº¹ ÇÁ·¹ÀÓ ÃßÀû
 
         for (int i = 0; i < num; ++i) {
             int received = serial.read(receiveFrame.data(), frameSize);
             bool isFrameOk = true;
             std::string errorReason = "";
+            int frameNum = -1;
 
             if (received != frameSize) {
                 isFrameOk = false;
                 errorReason = "Size mismatch (got " + std::to_string(received) + ")";
+                
+                // ÇÁ·¹ÀÓ Àçµ¿±âÈ­ ½Ãµµ
+                if (serial.findFrameStart()) {
+                    logMessage("Frame resynchronized, continuing...");
+                }
             } else {
-	    // ë°ì´í„° ë‚´ìš© ê²€ì¦
-                int frameNum;
+                // µ¥ÀÌÅÍ ³»¿ë °ËÁõ
                 memcpy(&frameNum, &receiveFrame[1], FRAME_HEADER_SIZE);
 
                 if (receiveFrame[0] != SOF || receiveFrame[frameSize - 1] != EOF_BYTE) {
@@ -465,130 +699,257 @@ void clientMode(const std::string& comport, int baudrate, int datasize, int num)
             }
 
             if (isFrameOk) {
+                // Áßº¹ ÇÁ·¹ÀÓ Ã¼Å©
+                if (receivedFrames.find(frameNum) != receivedFrames.end()) {
+                    logMessage("Warning: Duplicate frame " + std::to_string(frameNum) + " received, sending ACK again");
+                    sendFrameAck(serial, frameNum);
+                    i--;  // Ä«¿îÅÍ À¯Áö
+                    continue;
+                }
+                
+                receivedFrames.insert(frameNum);
                 clientResults.totalReceivedBytes += received;
                 clientResults.receivedNum++;
-                logMessage("Received frame " + std::to_string(i) + ": OK");
+                
+                // ACK Àü¼Û
+                if (!sendFrameAck(serial, frameNum)) {
+                    logMessage("Warning: Failed to send ACK for frame " + std::to_string(frameNum));
+                }
+                
+                if (i % 100 == 0 || i < 10) {
+                    logMessage("Received frame " + std::to_string(i) + ": OK, ACK sent.");
+                }
             } else {
                 clientResults.errorCount++;
-                logMessage("Received frame " + std::to_string(i) + ": NG - " + errorReason + ". Total errors: " + std::to_string(clientResults.errorCount));
+                
+                // NAK Àü¼Û
+                if (frameNum >= 0) {
+                    if (!sendFrameNak(serial, frameNum)) {
+                        logMessage("Warning: Failed to send NAK for frame " + std::to_string(frameNum));
+                    }
+                    logMessage("Received frame " + std::to_string(i) + ": NG - " + errorReason + ", NAK sent. Total errors: " + std::to_string(clientResults.errorCount));
+                } else {
+                    logMessage("Received frame " + std::to_string(i) + ": NG - " + errorReason + " (cannot send NAK)");
+                }
+                
+                // ¿¡·¯ ÈÄ Àçµ¿±âÈ­ ½Ãµµ
+                i--;  // °°Àº ÇÁ·¹ÀÓ ¹øÈ£·Î Àç½Ãµµ
             }
         }
-        receiverDone = true;  // ìˆ˜ì‹  ì™„ë£Œ í‘œì‹œ
-        logMessage("Receiver thread completed. Received " + std::to_string(clientResults.receivedNum) + "/" + std::to_string(num) + " frames.");
-    };
+        logMessage("Phase 2 complete: All frames received.");
+    }
 
-    // ì†¡ì‹ ê³¼ ìˆ˜ì‹ ì„ ë™ì‹œì— ìˆ˜í–‰í•˜ì—¬ ë²„í¼ ì˜¤ë²„í”Œë¡œìš° ë°©ì§€
-    std::thread senderThread(sender);
-    std::thread receiverThread(receiver);
+
+    // ¼º´É ÃøÁ¤ Á¾·á
+    auto endTime = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = endTime - startTime;
+    clientResults.elapsedSeconds = elapsed.count();
     
-    senderThread.join();
-    receiverThread.join();
+    // ¼º´É ÁöÇ¥ °è»ê
+    if (clientResults.elapsedSeconds > 0) {
+        clientResults.throughputMBps = (clientResults.totalReceivedBytes / (1024.0 * 1024.0)) / clientResults.elapsedSeconds;
+        clientResults.charactersPerSecond = clientResults.totalReceivedBytes / clientResults.elapsedSeconds;
+    }
 
     logMessage("Data exchange complete.");
+    logMessage("Performance: " + std::to_string(clientResults.throughputMBps) + " MB/s, " + 
+               std::to_string(clientResults.charactersPerSecond) + " chars/s (CPS)");
     
-    // === ìŠ¤ë ˆë“œ ì™„ë£Œ í™•ì¸ ë° ë²„í¼ ì •ë¦¬ ===
-    // 1. ì–‘ìª½ ìŠ¤ë ˆë“œê°€ ì™„ì „íˆ ì¢…ë£Œë  ë•Œê¹Œì§€ ëŒ€ê¸°
-    int waitCount = 0;
-    while ((!senderDone || !receiverDone) && waitCount < 100) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        waitCount++;
-    }
+    // ¹öÆÛ ¾ÈÁ¤È­ ´ë±â (1ÃÊ·Î Áõ°¡)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     
-    if (!senderDone || !receiverDone) {
-        logMessage("Warning: Thread completion timeout. Sender: " + 
-                  std::string(senderDone ? "Done" : "Not Done") + 
-                  ", Receiver: " + std::string(receiverDone ? "Done" : "Not Done"));
-    }
-    
-    // 2. ëª¨ë“  í”„ë ˆì„ì´ ìˆ˜ì‹ ë˜ì—ˆëŠ”ì§€ í™•ì¸
-    if (clientResults.receivedNum < num) {
-        logMessage("Warning: Not all frames received (" + 
-                  std::to_string(clientResults.receivedNum) + "/" + 
-                  std::to_string(num) + "). Waiting for remaining data...");
-        std::this_thread::sleep_for(std::chrono::seconds(2));
-    }
-    
-    // 3. ë²„í¼ì— ë‚¨ì€ ë°ì´í„°ê°€ ì•ˆì •í™”ë  ë•Œê¹Œì§€ ëŒ€ê¸°
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    
-    // === ë™ê¸°í™” ACK êµí™˜ (ì–‘ìª½ ì¤€ë¹„ ì™„ë£Œ í™•ì¸) ===
-    // 4. READY ACK ì „ì†¡
+    // === µ¿±âÈ­ ACK ±³È¯ (¾çÂÊ ÁØºñ ¿Ï·á È®ÀÎ) ===
+    // 1. READY ACK Àü¼Û
     if (!sendReadyAck(serial)) {
         logMessage("Error: Failed to synchronize with server.");
         return;
     }
     
-    // 2. ì„œë²„ì˜ READY ACK ëŒ€ê¸°
+    // 2. ¼­¹öÀÇ READY ACK ´ë±â
     if (!waitForReadyAck(serial)) {
         logMessage("Error: Server not ready for result exchange.");
         return;
     }
     
-    // 3. ì–‘ìª½ ëª¨ë‘ ì¤€ë¹„ë¨ - ì§§ì€ ëŒ€ê¸° í›„ ê²°ê³¼ êµí™˜
+    // 3. ¾çÂÊ ¸ğµÎ ÁØºñµÊ - ÂªÀº ´ë±â ÈÄ °á°ú ±³È¯
     logMessage("Synchronization complete. Starting result exchange.");
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    // ê·œì¹™ 1: í´ë¼ì´ì–¸íŠ¸ëŠ” 'Master'ë¡œì„œ ê²°ê³¼ë¥¼ ë¨¼ì € ì „ì†¡í•œë‹¤.
+    // ±ÔÄ¢ 1: Å¬¶óÀÌ¾ğÆ®´Â 'Master'·Î¼­ °á°ú¸¦ ¸ÕÀú Àü¼ÛÇÑ´Ù.
     if (serial.write(reinterpret_cast<char*>(&clientResults), sizeof(Results)) != sizeof(Results)) {
         logMessage("Error: Failed to send results to server.");
     } else {
         logMessage("Client results sent to server.");
     }
 
-    // ê·œì¹™ 2: ì„œë²„ë¡œë¶€í„° ì˜¤ëŠ” ê²°ê³¼ ì‘ë‹µì„ ìˆ˜ì‹ í•œë‹¤.
+    // ±ÔÄ¢ 2: ¼­¹ö·ÎºÎÅÍ ¿À´Â °á°ú ÀÀ´äÀ» ¼ö½ÅÇÑ´Ù.
     Results serverResults;
     if (serial.read(reinterpret_cast<char*>(&serverResults), sizeof(Results)) == sizeof(Results)) {
         logMessage("Results received from server.");
-        // 12. ìµœì¢… ê²°ê³¼ ë¡œê¹…
-        logMessage("--- Final Client Report ---");
-        logMessage("Sent: datasize=" + std::to_string(datasize) + ", num=" + std::to_string(num));
-        logMessage("Received from Server: total bytes=" + std::to_string(serverResults.totalReceivedBytes) +
-                   ", num=" + std::to_string(serverResults.receivedNum) + ", errors=" + std::to_string(serverResults.errorCount));
-        logMessage("Client's own reception: total bytes=" + std::to_string(clientResults.totalReceivedBytes) +
-                   ", num=" + std::to_string(clientResults.receivedNum) + ", errors=" + std::to_string(clientResults.errorCount));
+        
+        // 12. ÃÖÁ¾ °á°ú ·Î±ë (È®ÀåµÈ Á¤º¸ Æ÷ÇÔ)
+        logMessage("=== Final Client Report ===");
+        logMessage("Test Configuration:");
+        logMessage("  - Data size: " + std::to_string(datasize) + " bytes");
+        logMessage("  - Frame count: " + std::to_string(num));
+        logMessage("  - Protocol version: " + std::to_string(PROTOCOL_VERSION));
+        
+        logMessage("\nClient Transmission Results:");
+        logMessage("  - Retransmissions: " + std::to_string(clientResults.retransmitCount));
+        
+        logMessage("\nClient Reception Results:");
+        logMessage("  - Received frames: " + std::to_string(clientResults.receivedNum) + "/" + std::to_string(num));
+        logMessage("  - Total bytes: " + std::to_string(clientResults.totalReceivedBytes));
+        logMessage("  - Errors: " + std::to_string(clientResults.errorCount));
+        logMessage("  - Elapsed time: " + std::to_string(clientResults.elapsedSeconds) + " seconds");
+        logMessage("  - Throughput: " + std::to_string(clientResults.throughputMBps) + " MB/s");
+        logMessage("  - CPS (chars/sec): " + std::to_string(clientResults.charactersPerSecond));
+        
+        logMessage("\nServer Reception Results:");
+        logMessage("  - Received frames: " + std::to_string(serverResults.receivedNum) + "/" + std::to_string(num));
+        logMessage("  - Total bytes: " + std::to_string(serverResults.totalReceivedBytes));
+        logMessage("  - Errors: " + std::to_string(serverResults.errorCount));
+        logMessage("  - Retransmissions: " + std::to_string(serverResults.retransmitCount));
+        logMessage("  - Elapsed time: " + std::to_string(serverResults.elapsedSeconds) + " seconds");
+        logMessage("  - Throughput: " + std::to_string(serverResults.throughputMBps) + " MB/s");
+        logMessage("  - CPS (chars/sec): " + std::to_string(serverResults.charactersPerSecond));
+        
+        logMessage("=========================");
     } else {
         logMessage("Error: Failed to receive results from server.");
     }
 }
 
 void serverMode(const std::string& comport, int baudrate) {
-    logMessage("--- Server Mode ---");
+    logMessage("--- Server Mode (Protocol V" + std::to_string(PROTOCOL_VERSION) + ") ---");
     SerialPort serial;
     if (!serial.open(comport, baudrate)) {
         return;
     }
     logMessage("Server waiting for a client on " + comport + "...");
 
-    // 4. í´ë¼ì´ì–¸íŠ¸ë¡œë¶€í„° ì˜µì…˜ ìˆ˜ì‹ 
+    // 4. Å¬¶óÀÌ¾ğÆ®·ÎºÎÅÍ ¿É¼Ç ¼ö½Å
     Settings settings;
     if (serial.read(reinterpret_cast<char*>(&settings), sizeof(Settings)) != sizeof(Settings)) {
         logMessage("Error: Failed to receive settings from client. Connection timed out or closed.");
         return;
     }
     
-    logMessage("Client connected. Settings received: datasize=" + std::to_string(settings.datasize) + ", num=" + std::to_string(settings.num));
+    // ÇÁ·ÎÅäÄİ ¹öÀü È®ÀÎ
+    if (settings.protocolVersion != PROTOCOL_VERSION) {
+        logMessage("Error: Protocol version mismatch! Client: " + std::to_string(settings.protocolVersion) + 
+                   ", Server: " + std::to_string(PROTOCOL_VERSION));
+        logMessage("Please update both client and server to the same version.");
+        return;
+    }
+    
+    logMessage("Client connected. Settings received: protocolVersion=" + std::to_string(settings.protocolVersion) + 
+               ", datasize=" + std::to_string(settings.datasize) + ", num=" + std::to_string(settings.num));
 
-    // 5. í´ë¼ì´ì–¸íŠ¸ë¡œ ACK ë©”ì‹œì§€ ì „ì†¡
+    // 5. Å¬¶óÀÌ¾ğÆ®·Î ACK ¸Ş½ÃÁö Àü¼Û
     if (serial.write("ACK", 3) != 3) {
         logMessage("Error: Failed to send ACK to client.");
         return;
     }
     logMessage("ACK sent to client.");
 
-    // 7 & 9. ë°ì´í„° ì†¡ìˆ˜ì‹  ë° ë¬´ê²°ì„± ê²€ì‚¬ (ì†¡ìˆ˜ì‹  ë™ì‹œ ì§„í–‰)
+    // 7 & 9. µ¥ÀÌÅÍ ¼Û¼ö½Å ¹× ¹«°á¼º °Ë»ç (Half-Duplex: ¼øÂ÷ ¼Û¼ö½Å)
     const int datasize = settings.datasize;
     const int num = settings.num;
     const int frameSize = datasize + FRAME_OVERHEAD;
     std::vector<char> sendFrame(frameSize);
     std::vector<char> receiveFrame(frameSize);
-    Results serverResults = {0, 0, 0};
+    Results serverResults = {0, 0, 0, 0, 0.0, 0.0, 0.0};
     
-    // ìŠ¤ë ˆë“œ ì™„ë£Œ í”Œë˜ê·¸
-    std::atomic<bool> senderDone(false);
-    std::atomic<bool> receiverDone(false);
+    // ¼º´É ÃøÁ¤ ½ÃÀÛ
+    auto startTime = std::chrono::high_resolution_clock::now();
 
-    auto sender = [&]() {
-        // í”„ë ˆì„ êµ¬ì„±
+    // ===== Phase 1: ¼­¹ö°¡ µ¥ÀÌÅÍ ¼ö½Å =====
+    logMessage("Phase 1: Server receiving data...");
+    {
+        std::vector<char> expectedPayload(datasize);
+        // Å¬¶óÀÌ¾ğÆ®¿¡¼­ ¿À´Â ÆĞÅÏ: j % 256
+        for (int j = 0; j < datasize; ++j) {
+            expectedPayload[j] = static_cast<char>(j % 256);
+        }
+        
+        std::set<int> receivedFrames;  // Áßº¹ ÇÁ·¹ÀÓ ÃßÀû
+
+        for (int i = 0; i < num; ++i) {
+            int received = serial.read(receiveFrame.data(), frameSize);
+            bool isFrameOk = true;
+            std::string errorReason = "";
+            int frameNum = -1;
+
+            if (received != frameSize) {
+                isFrameOk = false;
+                errorReason = "Size mismatch (got " + std::to_string(received) + ")";
+                
+                // ÇÁ·¹ÀÓ Àçµ¿±âÈ­ ½Ãµµ
+                if (serial.findFrameStart()) {
+                    logMessage("Frame resynchronized, continuing...");
+                }
+            } else {
+                // µ¥ÀÌÅÍ ³»¿ë °ËÁõ
+                memcpy(&frameNum, &receiveFrame[1], FRAME_HEADER_SIZE);
+
+                if (receiveFrame[0] != SOF || receiveFrame[frameSize - 1] != EOF_BYTE) {
+                    isFrameOk = false;
+                    errorReason = "SOF/EOF mismatch";
+                } else if (frameNum != i) {
+                    isFrameOk = false;
+                    errorReason = "Frame num mismatch (expected " + std::to_string(i) + ", got " + std::to_string(frameNum) + ")";
+                } else if (memcmp(&receiveFrame[1 + FRAME_HEADER_SIZE], expectedPayload.data(), datasize) != 0) {
+                    isFrameOk = false;
+                    errorReason = "Payload content mismatch";
+                }
+            }
+
+            if (isFrameOk) {
+                // Áßº¹ ÇÁ·¹ÀÓ Ã¼Å©
+                if (receivedFrames.find(frameNum) != receivedFrames.end()) {
+                    logMessage("Warning: Duplicate frame " + std::to_string(frameNum) + " received, sending ACK again");
+                    sendFrameAck(serial, frameNum);
+                    i--;  // Ä«¿îÅÍ À¯Áö
+                    continue;
+                }
+                
+                receivedFrames.insert(frameNum);
+                serverResults.totalReceivedBytes += received;
+                serverResults.receivedNum++;
+                
+                // ACK Àü¼Û
+                if (!sendFrameAck(serial, frameNum)) {
+                    logMessage("Warning: Failed to send ACK for frame " + std::to_string(frameNum));
+                }
+                
+                if (i % 100 == 0 || i < 10) {
+                    logMessage("Received frame " + std::to_string(i) + ": OK, ACK sent.");
+                }
+            } else {
+                serverResults.errorCount++;
+                
+                // NAK Àü¼Û
+                if (frameNum >= 0) {
+                    if (!sendFrameNak(serial, frameNum)) {
+                        logMessage("Warning: Failed to send NAK for frame " + std::to_string(frameNum));
+                    }
+                    logMessage("Received frame " + std::to_string(i) + ": NG - " + errorReason + ", NAK sent. Total errors: " + std::to_string(serverResults.errorCount));
+                } else {
+                    logMessage("Received frame " + std::to_string(i) + ": NG - " + errorReason + " (cannot send NAK)");
+                }
+                
+                // ¿¡·¯ ÈÄ Àçµ¿±âÈ­ ½Ãµµ
+                i--;  // °°Àº ÇÁ·¹ÀÓ ¹øÈ£·Î Àç½Ãµµ
+            }
+        }
+        logMessage("Phase 1 complete: All frames received.");
+    }
+
+    // ===== Phase 2: ¼­¹ö°¡ µ¥ÀÌÅÍ ¼Û½Å =====
+    logMessage("Phase 2: Server sending data...");
+    {
+        // ÇÁ·¹ÀÓ ±¸¼º (¼­¹ö´Â 255 - (j % 256) ÆĞÅÏ)
         sendFrame[0] = SOF;
         for (int j = 0; j < datasize; ++j) {
             sendFrame[1 + FRAME_HEADER_SIZE + j] = static_cast<char>(255 - (j % 256));
@@ -597,130 +958,125 @@ void serverMode(const std::string& comport, int baudrate) {
 
         for (int i = 0; i < num; ++i) {
             memcpy(&sendFrame[1], &i, FRAME_HEADER_SIZE);
-            if (serial.write(sendFrame.data(), frameSize) != frameSize) {
-                logMessage("Error sending frame " + std::to_string(i));
-            } else {
-                 logMessage("Sending frame " + std::to_string(i) + "...");
-            }
-        }
-        senderDone = true;  // ì†¡ì‹  ì™„ë£Œ í‘œì‹œ
-        logMessage("Sender thread completed.");
-    };
-
-    auto receiver = [&]() {
-        std::vector<char> expectedPayload(datasize);
-        for (int j = 0; j < datasize; ++j) {
-            expectedPayload[j] = static_cast<char>(j % 256);
-        }
-
-        for (int i = 0; i < num; ++i) {
-            int received = serial.read(receiveFrame.data(), frameSize);
-            bool isFrameOk = true;
-            std::string errorReason = "";
-
-            if (received != frameSize) {
-                isFrameOk = false;
-                errorReason = "Size mismatch (got " + std::to_string(received) + ")";
-            } else {
-	    // ë°ì´í„° ë‚´ìš© ê²€ì¦
-                int frameNum;
-                memcpy(&frameNum, &receiveFrame[1], FRAME_HEADER_SIZE);
-
-                if (receiveFrame[0] != SOF || receiveFrame[frameSize - 1] != EOF_BYTE) {
-                    isFrameOk = false;
-                    errorReason = "SOF/EOF mismatch";
-                } else if (frameNum != i) {
-                    isFrameOk = false;
-                    errorReason = "Frame num mismatch (expected " + std::to_string(i) + ", got " + std::to_string(frameNum) + ")";
-                } else if (memcmp(&receiveFrame[1 + FRAME_HEADER_SIZE], expectedPayload.data(), datasize) != 0) {
-                    isFrameOk = false;
-                    errorReason = "Payload content mismatch";
+            
+            bool frameSent = false;
+            int attempts = 0;
+            
+            while (!frameSent && attempts < MAX_RETRANSMIT_ATTEMPTS) {
+                // ÇÁ·¹ÀÓ Àü¼Û
+                if (serial.write(sendFrame.data(), frameSize) != frameSize) {
+                    logMessage("Error sending frame " + std::to_string(i) + " (attempt " + std::to_string(attempts + 1) + ")");
+                    attempts++;
+                    serverResults.retransmitCount++;
+                    continue;
+                }
+                
+                // ACK/NAK ´ë±â
+                int ackResult = waitForFrameAck(serial, i, 5000);
+                
+                if (ackResult == 1) {
+                    // ACK ¼ö½Å ¼º°ø
+                    frameSent = true;
+                    if (i % 100 == 0 || i < 10) {
+                        logMessage("Frame " + std::to_string(i) + " sent and ACKed.");
+                    }
+                } else if (ackResult == 0) {
+                    // NAK ¼ö½Å - ÀçÀü¼Û ÇÊ¿ä
+                    logMessage("Frame " + std::to_string(i) + " NAKed, retransmitting (attempt " + std::to_string(attempts + 1) + ")");
+                    attempts++;
+                    serverResults.retransmitCount++;
+                } else {
+                    // Å¸ÀÓ¾Æ¿ô - ÀçÀü¼Û ½Ãµµ
+                    logMessage("Frame " + std::to_string(i) + " ACK timeout, retransmitting (attempt " + std::to_string(attempts + 1) + ")");
+                    attempts++;
+                    serverResults.retransmitCount++;
                 }
             }
-
-            if (isFrameOk) {
-                serverResults.totalReceivedBytes += received;
-                serverResults.receivedNum++;
-                logMessage("Received frame " + std::to_string(i) + ": OK");
-            } else {
+            
+            if (!frameSent) {
+                logMessage("Error: Failed to send frame " + std::to_string(i) + " after " + std::to_string(MAX_RETRANSMIT_ATTEMPTS) + " attempts.");
                 serverResults.errorCount++;
-                logMessage("Received frame " + std::to_string(i) + ": NG - " + errorReason + ". Total errors: " + std::to_string(serverResults.errorCount));
             }
         }
-        receiverDone = true;  // ìˆ˜ì‹  ì™„ë£Œ í‘œì‹œ
-        logMessage("Receiver thread completed. Received " + std::to_string(serverResults.receivedNum) + "/" + std::to_string(num) + " frames.");
-    };
+        logMessage("Phase 2 complete: All frames sent.");
+    }
 
-    // ì†¡ì‹ ê³¼ ìˆ˜ì‹ ì„ ë™ì‹œì— ìˆ˜í–‰í•˜ì—¬ ë²„í¼ ì˜¤ë²„í”Œë¡œìš° ë°©ì§€
-    std::thread receiverThread(receiver);
-    std::thread senderThread(sender);
+
+    // ¼º´É ÃøÁ¤ Á¾·á
+    auto endTime = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = endTime - startTime;
+    serverResults.elapsedSeconds = elapsed.count();
     
-    receiverThread.join();
-    senderThread.join();
+    // ¼º´É ÁöÇ¥ °è»ê
+    if (serverResults.elapsedSeconds > 0) {
+        serverResults.throughputMBps = (serverResults.totalReceivedBytes / (1024.0 * 1024.0)) / serverResults.elapsedSeconds;
+        serverResults.charactersPerSecond = serverResults.totalReceivedBytes / serverResults.elapsedSeconds;
+    }
 
     logMessage("Data exchange complete.");
+    logMessage("Performance: " + std::to_string(serverResults.throughputMBps) + " MB/s, " + 
+               std::to_string(serverResults.charactersPerSecond) + " chars/s (CPS)");
     
-    // === ìŠ¤ë ˆë“œ ì™„ë£Œ í™•ì¸ ë° ë²„í¼ ì •ë¦¬ ===
-    // 1. ì–‘ìª½ ìŠ¤ë ˆë“œê°€ ì™„ì „íˆ ì¢…ë£Œë  ë•Œê¹Œì§€ ëŒ€ê¸°
-    int waitCount = 0;
-    while ((!senderDone || !receiverDone) && waitCount < 100) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        waitCount++;
-    }
+    // ¹öÆÛ ¾ÈÁ¤È­ ´ë±â (1ÃÊ·Î Áõ°¡)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     
-    if (!senderDone || !receiverDone) {
-        logMessage("Warning: Thread completion timeout. Sender: " + 
-                  std::string(senderDone ? "Done" : "Not Done") + 
-                  ", Receiver: " + std::string(receiverDone ? "Done" : "Not Done"));
-    }
-    
-    // 2. ëª¨ë“  í”„ë ˆì„ì´ ìˆ˜ì‹ ë˜ì—ˆëŠ”ì§€ í™•ì¸
-    if (serverResults.receivedNum < num) {
-        logMessage("Warning: Not all frames received (" + 
-                  std::to_string(serverResults.receivedNum) + "/" + 
-                  std::to_string(num) + "). Waiting for remaining data...");
-        std::this_thread::sleep_for(std::chrono::seconds(2));
-    }
-    
-    // 3. ë²„í¼ì— ë‚¨ì€ ë°ì´í„°ê°€ ì•ˆì •í™”ë  ë•Œê¹Œì§€ ëŒ€ê¸°
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    
-    // === ë™ê¸°í™” ACK êµí™˜ (ì–‘ìª½ ì¤€ë¹„ ì™„ë£Œ í™•ì¸) ===
-    // 4. READY ACK ì „ì†¡
+    // === µ¿±âÈ­ ACK ±³È¯ (¾çÂÊ ÁØºñ ¿Ï·á È®ÀÎ) ===
+    // 1. READY ACK Àü¼Û
     if (!sendReadyAck(serial)) {
         logMessage("Error: Failed to synchronize with client.");
         return;
     }
     
-    // 2. í´ë¼ì´ì–¸íŠ¸ì˜ READY ACK ëŒ€ê¸°
+    // 2. Å¬¶óÀÌ¾ğÆ®ÀÇ READY ACK ´ë±â
     if (!waitForReadyAck(serial)) {
         logMessage("Error: Client not ready for result exchange.");
         return;
     }
     
-    // 3. ì–‘ìª½ ëª¨ë‘ ì¤€ë¹„ë¨ - ì§§ì€ ëŒ€ê¸° í›„ ê²°ê³¼ êµí™˜
+    // 3. ¾çÂÊ ¸ğµÎ ÁØºñµÊ - ÂªÀº ´ë±â ÈÄ °á°ú ±³È¯
     logMessage("Synchronization complete. Starting result exchange.");
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    // ê·œì¹™ 1: ì„œë²„ëŠ” 'Slave'ë¡œì„œ í´ë¼ì´ì–¸íŠ¸ì˜ ê²°ê³¼ë¥¼ ë¨¼ì € ìˆ˜ì‹ í•œë‹¤.
+    // ±ÔÄ¢ 1: ¼­¹ö´Â 'Slave'·Î¼­ Å¬¶óÀÌ¾ğÆ®ÀÇ °á°ú¸¦ ¸ÕÀú ¼ö½ÅÇÑ´Ù.
     Results clientResults;
     if (serial.read(reinterpret_cast<char*>(&clientResults), sizeof(Results)) == sizeof(Results)) {
         logMessage("Results received from client.");
 
-        // ê·œì¹™ 2: í´ë¼ì´ì–¸íŠ¸ ê²°ê³¼ë¥¼ ë°›ì€ í›„, ìì‹ ì˜ ê²°ê³¼ë¥¼ ì‘ë‹µìœ¼ë¡œ ì „ì†¡í•œë‹¤.
+        // ±ÔÄ¢ 2: Å¬¶óÀÌ¾ğÆ® °á°ú¸¦ ¹ŞÀº ÈÄ, ÀÚ½ÅÀÇ °á°ú¸¦ ÀÀ´äÀ¸·Î Àü¼ÛÇÑ´Ù.
         if (serial.write(reinterpret_cast<char*>(&serverResults), sizeof(Results)) != sizeof(Results)) {
             logMessage("Error: Failed to send results to client.");
         } else {
             logMessage("Server results sent to client.");
         }
 
-        // 13. ìµœì¢… ê²°ê³¼ ë¡œê¹…
-        logMessage("--- Final Server Report ---");
-        logMessage("Sent: datasize=" + std::to_string(settings.datasize) + ", num=" + std::to_string(settings.num));
-        logMessage("Received from Client: total bytes=" + std::to_string(clientResults.totalReceivedBytes) +
-                   ", num=" + std::to_string(clientResults.receivedNum) + ", errors=" + std::to_string(clientResults.errorCount));
-        logMessage("Server's own reception: total bytes=" + std::to_string(serverResults.totalReceivedBytes) +
-                   ", num=" + std::to_string(serverResults.receivedNum) + ", errors=" + std::to_string(serverResults.errorCount));
+        // 13. ÃÖÁ¾ °á°ú ·Î±ë (È®ÀåµÈ Á¤º¸ Æ÷ÇÔ)
+        logMessage("=== Final Server Report ===");
+        logMessage("Test Configuration:");
+        logMessage("  - Data size: " + std::to_string(settings.datasize) + " bytes");
+        logMessage("  - Frame count: " + std::to_string(settings.num));
+        logMessage("  - Protocol version: " + std::to_string(settings.protocolVersion));
+        
+        logMessage("\nServer Transmission Results:");
+        logMessage("  - Retransmissions: " + std::to_string(serverResults.retransmitCount));
+        
+        logMessage("\nServer Reception Results:");
+        logMessage("  - Received frames: " + std::to_string(serverResults.receivedNum) + "/" + std::to_string(settings.num));
+        logMessage("  - Total bytes: " + std::to_string(serverResults.totalReceivedBytes));
+        logMessage("  - Errors: " + std::to_string(serverResults.errorCount));
+        logMessage("  - Elapsed time: " + std::to_string(serverResults.elapsedSeconds) + " seconds");
+        logMessage("  - Throughput: " + std::to_string(serverResults.throughputMBps) + " MB/s");
+        logMessage("  - CPS (chars/sec): " + std::to_string(serverResults.charactersPerSecond));
+        
+        logMessage("\nClient Reception Results:");
+        logMessage("  - Received frames: " + std::to_string(clientResults.receivedNum) + "/" + std::to_string(settings.num));
+        logMessage("  - Total bytes: " + std::to_string(clientResults.totalReceivedBytes));
+        logMessage("  - Errors: " + std::to_string(clientResults.errorCount));
+        logMessage("  - Retransmissions: " + std::to_string(clientResults.retransmitCount));
+        logMessage("  - Elapsed time: " + std::to_string(clientResults.elapsedSeconds) + " seconds");
+        logMessage("  - Throughput: " + std::to_string(clientResults.throughputMBps) + " MB/s");
+        logMessage("  - CPS (chars/sec): " + std::to_string(clientResults.charactersPerSecond));
+        
+        logMessage("=========================");
     } else {
         logMessage("Error: Failed to receive results from client.");
     }

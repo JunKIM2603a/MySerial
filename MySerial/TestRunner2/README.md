@@ -73,9 +73,42 @@ Client options:
 - Validation replicates the original TestRunner logic: expected bytes/packets must match `(datasize + 6) * numPackets` and `numPackets`, and error counters must be zero.
 - Run reports contain the full JSON payload returned by the server, enabling downstream automation or trend analysis.
 
+## Protocol V2 Support (Nov 2025)
+
+TestRunner2 now supports SerialCommunicator Protocol V2 with enhanced metrics:
+
+### New Fields in JSON Output
+- **`retransmitCount`**: Number of frame retransmissions (ACK/NAK protocol)
+- **`elapsedSeconds`**: Actual elapsed time in seconds
+- **`throughputMBps`**: Throughput in MB/s
+- **`cps`**: Characters (bytes) per second transmission rate
+
+### Enhanced Parsing
+- Parses `=== Final Server/Client Report ===` format
+- Extracts structured multi-line results
+- Supports separate Transmission and Reception results sections
+
+### JSON Schema Example
+```json
+{
+  "role": "Server",
+  "portName": "COM3/COM4",
+  "duration": 1.02,
+  "throughput": 0.768,
+  "cps": 100585.0,
+  "totalBytes": 103000,
+  "totalPackets": 100,
+  "retransmitCount": 0,
+  "elapsedSeconds": 1.02,
+  "throughputMBps": 0.096,
+  "success": true
+}
+```
+
 ## Notes
 
 - SerialCommunicator must be accessible on the server machine, and every COM pair must already be wired/looped (e.g., via `com0com`).
+- **Protocol V2 Required**: TestRunner2 now expects SerialCommunicator Protocol V2 output format. Ensure both are updated.
 - `numPackets == 0` (infinite mode) is rejected to avoid unbounded test time.
 - The server executes all SerialCommunicator processes locally, so ensure it has permission to spawn child processes and access the COM ports.
 

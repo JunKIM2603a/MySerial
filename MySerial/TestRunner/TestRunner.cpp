@@ -26,6 +26,10 @@ struct TestResult {
     long long sequenceErrors = 0;
     long long checksumErrors = 0;
     long long contentMismatches = 0;
+    int retransmitCount = 0;        // Protocol V2: 재전송 횟수
+    double elapsedSeconds = 0.0;    // Protocol V2: 경과 시간 (초)
+    double throughputMBps = 0.0;    // Protocol V2: 처리량 (MB/s)
+    double charactersPerSecond = 0.0; // Protocol V2: CPS
     std::string failureReason;
     bool success = false;
 };
@@ -169,45 +173,85 @@ TestResult ParseTestSummary(const std::string& output, const std::string& role, 
         return result;
     }
 
-    // Parse SerialCommunicator output format
-    // Looking for "Final Client Report" or "Final Server Report"
+    // Parse SerialCommunicator Protocol V2 output format
+    // Looking for "=== Final Client Report ===" or "=== Final Server Report ==="
     std::regex summaryRegex;
+    std::regex retransmitRegex;
+    
     if (role == "Server") {
-        // Server output format:
-        // "Server's own reception: total bytes=XXX, num=YYY, errors=ZZZ"
+        // Server Protocol V2 output format
         summaryRegex = std::regex(
-            "--- Final Server Report ---"
+            "=== Final Server Report ==="
             "[\\s\\S]*?"
-            "Server's own reception: total bytes=(\\d+)"
+            "Server Reception Results:"
             "[\\s\\S]*?"
-            ", num=(\\d+)"
+            "- Received frames: (\\d+)/(\\d+)"
             "[\\s\\S]*?"
-            ", errors=(\\d+)"
+            "- Total bytes: (\\d+)"
+            "[\\s\\S]*?"
+            "- Errors: (\\d+)"
+            "[\\s\\S]*?"
+            "- Elapsed time: ([\\d.]+) seconds"
+            "[\\s\\S]*?"
+            "- Throughput: ([\\d.]+) MB/s"
+            "[\\s\\S]*?"
+            "- CPS \\(chars/sec\\): ([\\d.]+)"
+        );
+        // Parse retransmit count from Transmission Results section
+        retransmitRegex = std::regex(
+            "Server Transmission Results:"
+            "[\\s\\S]*?"
+            "- Retransmissions: (\\d+)"
         );
     } else { // Client
-        // Client output format:
-        // "Client's own reception: total bytes=XXX, num=YYY, errors=ZZZ"
+        // Client Protocol V2 output format
         summaryRegex = std::regex(
-            "--- Final Client Report ---"
+            "=== Final Client Report ==="
             "[\\s\\S]*?"
-            "Client's own reception: total bytes=(\\d+)"
+            "Client Reception Results:"
             "[\\s\\S]*?"
-            ", num=(\\d+)"
+            "- Received frames: (\\d+)/(\\d+)"
             "[\\s\\S]*?"
-            ", errors=(\\d+)"
+            "- Total bytes: (\\d+)"
+            "[\\s\\S]*?"
+            "- Errors: (\\d+)"
+            "[\\s\\S]*?"
+            "- Elapsed time: ([\\d.]+) seconds"
+            "[\\s\\S]*?"
+            "- Throughput: ([\\d.]+) MB/s"
+            "[\\s\\S]*?"
+            "- CPS \\(chars/sec\\): ([\\d.]+)"
+        );
+        // Parse retransmit count from Transmission Results section
+        retransmitRegex = std::regex(
+            "Client Transmission Results:"
+            "[\\s\\S]*?"
+            "- Retransmissions: (\\d+)"
         );
     }
 
     std::smatch matches;
-    if (std::regex_search(output, matches, summaryRegex) && matches.size() == 4) {
+    // Protocol V2: Match group count is now 8 (receivedFrames, totalFrames, totalBytes, errors, elapsedSeconds, throughputMBps, cps)
+    if (std::regex_search(output, matches, summaryRegex) && matches.size() == 8) {
         try {
-            result.totalBytes = std::stoll(matches[1].str());
-            result.totalPackets = std::stoll(matches[2].str());
+            result.totalPackets = std::stoll(matches[1].str()); // Received frames
+            // matches[2] is total expected frames (we don't store separately)
+            result.totalBytes = std::stoll(matches[3].str());
+            result.contentMismatches = std::stoll(matches[4].str()); // errors field
+            result.elapsedSeconds = std::stod(matches[5].str());
+            result.throughputMBps = std::stod(matches[6].str());
+            result.charactersPerSecond = std::stod(matches[7].str());
+            
+            // Protocol V2: Parse retransmit count separately
+            std::smatch retransmitMatches;
+            if (std::regex_search(output, retransmitMatches, retransmitRegex) && retransmitMatches.size() == 2) {
+                result.retransmitCount = std::stoi(retransmitMatches[1].str());
+            }
+            
             result.sequenceErrors = 0; // SerialCommunicator doesn't track sequence errors separately
             result.checksumErrors = 0; // SerialCommunicator doesn't track checksum errors separately
-            result.contentMismatches = std::stoll(matches[3].str()); // errors field
-            result.duration = 0.0; // SerialCommunicator doesn't report duration
-            result.throughput = 0.0; // SerialCommunicator doesn't report throughput
+            result.duration = result.elapsedSeconds; // Use elapsed time as duration
+            result.throughput = result.throughputMBps * 8.0; // Convert MB/s to Mbps for compatibility
             result.success = true;
         } catch (const std::exception& e) {
             result.success = false;
@@ -223,7 +267,7 @@ TestResult ParseTestSummary(const std::string& output, const std::string& role, 
                  result.failureReason = "Failed to find Final Report in output. Process may have exited before completion.";
             }
         } else {
-             result.failureReason = "Failed to match test summary regex for role " + role + ". Output format may have changed or be incomplete.";
+             result.failureReason = "Failed to match Protocol V2 test summary regex for role " + role + ". Output format may have changed or be incomplete. Expected '=== Final " + role + " Report ===' format.";
         }
         std::cerr << "Parse warning for port " << port << " (" << role << "): " << result.failureReason << std::endl;
     }
@@ -233,15 +277,17 @@ TestResult ParseTestSummary(const std::string& output, const std::string& role, 
 
 
 void PrintResults(std::vector<TestResult>& results, long long expectedPackets, long long expectedBytes, const std::vector<std::string>& comports) {
-    std::cout << "\n--- FINAL TEST SUMMARY ---" << std::endl;
+    std::cout << "\n--- FINAL TEST SUMMARY (Protocol V2) ---" << std::endl;
     std::cout << std::left << std::setw(8) << "Role"
               << std::setw(12) << "COM Port"
-              << std::setw(15) << "Duration (s)"
-              << std::setw(18) << "Throughput (Mbps)"
-              << std::setw(22) << "Total Bytes Rx"
-              << std::setw(24) << "Total Packets Rx"
+              << std::setw(12) << "Duration(s)"
+              << std::setw(12) << "Thrput(MB/s)"
+              << std::setw(14) << "CPS(chars/s)"
+              << std::setw(16) << "Bytes Rx"
+              << std::setw(14) << "Packets Rx"
+              << std::setw(12) << "Retransmit"
               << std::setw(10) << "Status" << std::endl;
-    std::cout << std::string(109, '-') << std::endl;
+    std::cout << std::string(110, '-') << std::endl;
 
     bool all_ok = true;
     for (auto& res : results) {
@@ -298,10 +344,12 @@ void PrintResults(std::vector<TestResult>& results, long long expectedPackets, l
 
         std::cout << std::left << std::setw(8) << res.role
                   << std::setw(12) << comportName
-                  << std::setw(15) << std::fixed << std::setprecision(2) << res.duration
-                  << std::setw(18) << res.throughput
-                  << std::setw(22) << res.totalBytes
-                  << std::setw(24) << res.totalPackets
+                  << std::setw(12) << std::fixed << std::setprecision(2) << res.elapsedSeconds
+                  << std::setw(12) << std::fixed << std::setprecision(3) << res.throughputMBps
+                  << std::setw(14) << std::fixed << std::setprecision(0) << res.charactersPerSecond
+                  << std::setw(16) << res.totalBytes
+                  << std::setw(14) << res.totalPackets
+                  << std::setw(12) << res.retransmitCount
                   << std::setw(10) << (pass ? "PASS" : "FAIL") << std::endl;
         
         // Print detailed failure information
@@ -336,7 +384,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::string executable = "SerialCommunicator.exe";
+    std::string executable = "..\\SerialCommunicator.exe";
     
     // Parse COM port list (comma-separated) and create server/client pairs
     std::vector<std::string> comports;

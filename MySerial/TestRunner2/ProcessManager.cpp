@@ -483,31 +483,75 @@ TestResult ProcessManager::ParseTestSummary(const std::string& output,
         return result;
     }
 
+    // Protocol V2: Parse new format
     std::regex summaryRegex;
+    std::regex retransmitRegex;
+    
     if (role == "Server") {
         summaryRegex = std::regex(
-            "--- Final Server Report ---"
+            "=== Final Server Report ==="
             "[\\s\\S]*?"
-            "Server's own reception: total bytes=(\\d+)"
-            "[\\s\\S]*?, num=(\\d+)"
-            "[\\s\\S]*?, errors=(\\d+)");
+            "Server Reception Results:"
+            "[\\s\\S]*?"
+            "- Received frames: (\\d+)/(\\d+)"
+            "[\\s\\S]*?"
+            "- Total bytes: (\\d+)"
+            "[\\s\\S]*?"
+            "- Errors: (\\d+)"
+            "[\\s\\S]*?"
+            "- Elapsed time: ([\\d.]+) seconds"
+            "[\\s\\S]*?"
+            "- Throughput: ([\\d.]+) MB/s"
+            "[\\s\\S]*?"
+            "- CPS \\(chars/sec\\): ([\\d.]+)");
+        retransmitRegex = std::regex(
+            "Server Transmission Results:"
+            "[\\s\\S]*?"
+            "- Retransmissions: (\\d+)");
     } else {
         summaryRegex = std::regex(
-            "--- Final Client Report ---"
+            "=== Final Client Report ==="
             "[\\s\\S]*?"
-            "Client's own reception: total bytes=(\\d+)"
-            "[\\s\\S]*?, num=(\\d+)"
-            "[\\s\\S]*?, errors=(\\d+)");
+            "Client Reception Results:"
+            "[\\s\\S]*?"
+            "- Received frames: (\\d+)/(\\d+)"
+            "[\\s\\S]*?"
+            "- Total bytes: (\\d+)"
+            "[\\s\\S]*?"
+            "- Errors: (\\d+)"
+            "[\\s\\S]*?"
+            "- Elapsed time: ([\\d.]+) seconds"
+            "[\\s\\S]*?"
+            "- Throughput: ([\\d.]+) MB/s"
+            "[\\s\\S]*?"
+            "- CPS \\(chars/sec\\): ([\\d.]+)");
+        retransmitRegex = std::regex(
+            "Client Transmission Results:"
+            "[\\s\\S]*?"
+            "- Retransmissions: (\\d+)");
     }
 
     std::smatch matches;
-    if (std::regex_search(output, matches, summaryRegex) && matches.size() == 4) {
+    if (std::regex_search(output, matches, summaryRegex) && matches.size() == 8) {
         try {
-            result.totalBytes = std::stoll(matches[1].str());
-            result.totalPackets = std::stoll(matches[2].str());
-            result.contentMismatches = std::stoll(matches[3].str());
+            result.totalPackets = std::stoll(matches[1].str());
+            // matches[2] is expected frames (ignored)
+            result.totalBytes = std::stoll(matches[3].str());
+            result.contentMismatches = std::stoll(matches[4].str());
+            result.elapsedSeconds = std::stod(matches[5].str());
+            result.throughputMBps = std::stod(matches[6].str());
+            result.cps = std::stod(matches[7].str());
+            
+            // Parse retransmit count
+            std::smatch retransmitMatches;
+            if (std::regex_search(output, retransmitMatches, retransmitRegex) && retransmitMatches.size() == 2) {
+                result.retransmitCount = std::stoi(retransmitMatches[1].str());
+            }
+            
             result.sequenceErrors = 0;
             result.checksumErrors = 0;
+            result.duration = result.elapsedSeconds;
+            result.throughput = result.throughputMBps * 8.0; // MB/s to Mbps
             result.success = true;
         } catch (const std::exception& e) {
             result.success = false;
@@ -518,7 +562,7 @@ TestResult ProcessManager::ParseTestSummary(const std::string& output,
         if (output.find("Final") == std::string::npos && output.find("Report") == std::string::npos) {
             result.failureReason = "Final report not found. Process may have exited early.";
         } else {
-            result.failureReason = "Unable to parse final report.";
+            result.failureReason = "Unable to parse Protocol V2 final report. Expected '=== Final " + role + " Report ===' format.";
         }
     }
 

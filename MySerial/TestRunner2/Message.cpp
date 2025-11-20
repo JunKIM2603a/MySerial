@@ -20,6 +20,9 @@ static json TestResultToJson(const TestResult& result) {
         {"sequenceErrors", result.sequenceErrors},
         {"checksumErrors", result.checksumErrors},
         {"contentMismatches", result.contentMismatches},
+        {"retransmitCount", result.retransmitCount},           // Protocol V2
+        {"elapsedSeconds", result.elapsedSeconds},            // Protocol V2
+        {"throughputMBps", result.throughputMBps},            // Protocol V2
         {"failureReason", result.failureReason},
         {"success", result.success}
     };
@@ -39,6 +42,9 @@ static TestResult JsonToTestResult(const json& j) {
     r.sequenceErrors = j.value("sequenceErrors", 0LL);
     r.checksumErrors = j.value("checksumErrors", 0LL);
     r.contentMismatches = j.value("contentMismatches", 0LL);
+    r.retransmitCount = j.value("retransmitCount", 0);        // Protocol V2
+    r.elapsedSeconds = j.value("elapsedSeconds", 0.0);       // Protocol V2
+    r.throughputMBps = j.value("throughputMBps", 0.0);       // Protocol V2
     r.failureReason = j.value("failureReason", "");
     r.success = j.value("success", false);
     return r;

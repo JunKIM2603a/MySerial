@@ -257,7 +257,7 @@ bool ControlServer::ReceiveMessage(SOCKET socket, std::string& message, int time
     }
 
     message.resize(length);
-    char* buffer = message.data();
+    char* buffer = &message[0];
     size_t remaining = length;
     while (remaining > 0) {
         int chunk = recv(socket, buffer, static_cast<int>(remaining), 0);

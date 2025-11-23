@@ -58,7 +58,7 @@ int main(int argc, char* argv[]) {
         if (args.count("control-port")) {
             controlPort = std::stoi(args["control-port"]);
         }
-        std::string serialExe = "..\\sSerialCommunicator.exe";
+        std::string serialExe = "..\\SerialCommunicator.exe";
         if (args.count("serial-exe")) {
             serialExe = args["serial-exe"];
         }

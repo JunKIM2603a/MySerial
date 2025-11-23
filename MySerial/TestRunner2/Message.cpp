@@ -104,7 +104,7 @@ bool DeserializeConfigRequest(const std::string& text, SerialTestConfig& config)
         config.baudrate = cfg.value("baudrate", 115200);
         config.saveLogs = cfg.value("saveLogs", false);
         config.comportList = cfg.value("comports", "");
-        config.serialExecutable = cfg.value("serialExecutable", "SerialCommunicator.exe");
+        config.serialExecutable = cfg.value("serialExecutable", "");
         return true;
     } catch (...) {
         return false;

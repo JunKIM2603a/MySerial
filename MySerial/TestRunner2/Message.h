@@ -13,7 +13,7 @@ struct SerialTestConfig {
     int baudrate = 115200;
     bool saveLogs = false;
     std::string comportList; // comma separated
-    std::string serialExecutable = "SerialCommunicator.exe";
+    std::string serialExecutable = "";
 };
 
 struct TestResult {
